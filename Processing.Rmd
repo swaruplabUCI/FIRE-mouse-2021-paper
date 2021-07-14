@@ -1,0 +1,995 @@
+
+
+## Load split-pipe data into Seurat
+
+```{r eval=FALSE}
+
+# in bash terminal:
+# conda activate spatial
+library(Seurat)
+library(tidyverse)
+library(cowplot)
+library(Matrix)
+library(viridis)
+library(presto)
+library(harmony)
+library(ggpubr)
+library(DoubletFinder)
+library(RColorBrewer)
+library(ggrepel)
+library(patchwork)
+colfunc <- colorRampPalette(rev(brewer.pal(11, 'Spectral' )))
+prediction.colfunc <- colorRampPalette(rev(brewer.pal(9, 'Purples' )[2:9]))
+
+theme_set(theme_cowplot())
+
+# setwd("/dfs3b/swaruplab/smorabit/analysis/FIRE_mouse_2021/hardcore_filtering/")
+setwd("/dfs3b/swaruplab/smorabit/analysis/FIRE_mouse_2021/hardcore_filtering/")
+
+# directories
+splitpipe_outdir <- "~/swaruplab/smorabit/data/FIRE_mouse_2021/analysis/"
+data_dir <- "data/"
+fig_dir <- 'figures/'
+
+
+umap_theme <- theme(
+  axis.line=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+  axis.title.x=element_blank(),
+  axis.title.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border=element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank()
+)
+
+# re-load:
+seurat_obj <- readRDS('/dfs3b/swaruplab/smorabit/analysis/FIRE_mouse_2021/data/FIRE_mouse_seurat.rds')
+# seurat_obj <- seurat_obj[,!(seurat_obj$clusternum_anno %in% c('42-UNK', '44-VLMC / ODC'))]
+
+# color scheme for samples:
+color.scheme <- c(
+  brewer.pal(9, 'Reds')[2:9],
+  brewer.pal(9, 'Purples')[2:9],
+  brewer.pal(9, 'Oranges')[2:9],
+  brewer.pal(9, 'Greys')[2:9],
+  brewer.pal(9, 'Blues')[2:9],
+  brewer.pal(9, 'Greens')[2:9]
+)
+names(color.scheme) <- as.character(levels(seurat_obj$SampleID))
+
+sample_color.scheme <- c(
+  brewer.pal(9, 'Greys')[5],
+  brewer.pal(9, 'Purples')[7],
+  brewer.pal(9, 'Oranges')[6],
+  brewer.pal(9, 'Reds')[6],
+  brewer.pal(9, 'Blues')[5],
+  brewer.pal(9, 'Greens')[5]
+)
+names(sample_color.scheme) <- levels(seurat_obj$DX)
+
+################################################################################
+# Load split-pipe data into Seurat
+################################################################################
+
+sublibraries <- paste0(splitpipe_outdir, dir(splitpipe_outdir), '/')
+
+seurat_list <- list()
+for(sublibrary in dir(splitpipe_outdir)){
+  print(sublibrary)
+  lib <- paste0(splitpipe_outdir, sublibrary, '/')
+
+  # load data from split-pipe
+  X <- Matrix::readMM(paste0(lib, 'all-well/DGE_filtered/DGE.mtx')) %>% t
+  genes <- read.csv(paste0(lib, 'all-well/DGE_filtered/genes.csv'))
+  lib_meta <- read.csv(paste0(lib, 'all-well/DGE_filtered/cell_metadata.csv'))
+  rownames(lib_meta) <- lib_meta$cell_barcode
+
+  # set row and col names for expression matrix X:
+  colnames(X) <- lib_meta$cell_barcode
+  rownames(X) <- genes$gene_name
+
+  # create seurat object
+  cur <- Seurat::CreateSeuratObject(
+    counts = X,
+    meta = lib_meta
+  )
+  cur$sublibrary <- sublibrary
+  seurat_list[[sublibrary]] <- cur
+}
+
+# merge seurat objects:
+seurat_obj <- merge(seurat_list[[1]], seurat_list[2:length(seurat_list)])
+rm(seurat_list); gc();
+
+# add sample metadata:
+sample_meta <- read.csv('~/swaruplab/smorabit/analysis/FIRE_mouse_2021/data/splitseq_meta.csv')
+seurat_obj@meta.data <- cbind(seurat_obj@meta.data, sample_meta[match(as.character(seurat_obj$sample), as.character(sample_meta$SampleID)),])
+all.equal(as.character(seurat_obj$sample), as.character(seurat_obj$SampleID))
+
+# change the name of the different groups:
+seurat_obj$group <- seurat_obj$DX
+group_df <- data.frame(
+  'group' = c('WT', '5xFAD', 'FIRE', '5xFIRE', '5xFIRE + PBS', '5xFIRE + transplant'),
+  'DX' = c('Wt-Wt-NA', '5x-Wt-NA', 'Wt-Mut-NA', '5x-Mut-NA', '5x-Mut-PBS', '5x-Mut-CELL'),
+  stringsAsFactors=FALSE
+)
+
+seurat_obj$DX <- factor(
+  group_df$group[match(as.character(seurat_obj$group), as.character(group_df$DX))],
+  levels = c('WT', '5xFAD', 'FIRE', '5xFIRE', '5xFIRE + PBS', '5xFIRE + transplant')
+)
+
+
+
+#################################################################################
+# plot the number of cells per sample before filtering:
+#################################################################################
+
+# color scheme for samples:
+color.scheme <- c(
+  brewer.pal(9, 'Reds')[2:9],
+  brewer.pal(9, 'Purples')[2:9],
+  brewer.pal(9, 'Oranges')[2:9],
+  brewer.pal(9, 'Greys')[2:9],
+  brewer.pal(9, 'Blues')[2:9],
+  brewer.pal(9, 'Greens')[2:9]
+)
+names(color.scheme) <- as.character(levels(seurat_obj$SampleID))
+
+
+df <- as.data.frame(table(seurat_obj$SampleID))
+df$group <- factor(
+  as.character(seurat_obj@meta.data$DX)[match(as.character(df$Var1), seurat_obj@meta.data$SampleID)],
+  levels = levels(seurat_obj$DX)
+)
+
+p <- ggplot(df, aes(x=reorder(Var1, Freq), y=Freq, fill=Var1, )) +
+  geom_bar(stat='identity') +
+  geom_text(aes(label=scales::comma(Freq)),  color="black", size=3.5, hjust='inward') +
+  scale_fill_manual(values=color.scheme) +
+  coord_flip() + NoLegend() + RotatedAxis() + xlab('') + ylab('') +
+  ggtitle('Number of cells per sample in each condition') + theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.grid.minor=element_blank(),
+    panel.grid.major.x=element_line(colour="lightgray", size=0.5),
+    axis.ticks.y=element_blank(),
+  )
+
+pdf(paste0(fig_dir, 'barplot_nCells_samples_pre_filtering.pdf'), width=7, height=6)
+p + facet_wrap(~group, scales='free_y', ncol=4)
+dev.off()
+
+```
+
+Quality Control filtering:
+
+```{r eval=FALSE}
+
+
+seurat_obj[["percent.mt"]] <- PercentageFeatureSet(object = seurat_obj, pattern = "^mt-")
+pdf(paste0(fig_dir, "qc_violin_plot.pdf"), width=10, height=10)
+VlnPlot(seurat_obj, group.by="SampleID", features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 1, pt.size=0)
+dev.off()
+
+# apply filter:
+filter <- !(seurat_obj$nCount_RNA > 20000 | seurat_obj$percent.mt > 5)
+table(filter)
+
+# # same filter as rosenberg et al data
+# filter <- !(seurat_obj$nCount_RNA > 5000 | seurat_obj$percent.mt > 1 | seurat_obj$nFeature_RNA > 2500 | seurat_obj$nFeature_RNA < 250)
+# table(filter)
+
+
+seurat_filtered <- seurat_obj[,filter]
+
+pdf(paste0(fig_dir, "qc_violin_plot_postFiltering.pdf"), width=10, height=10)
+VlnPlot(seurat_filtered, group.by="SampleID", features = c("nFeature_RNA", "nCount_RNA", "percent.mt"), ncol = 1, pt.size=0)
+dev.off()
+
+seurat_obj <- seurat_filtered; rm(seurat_filtered); gc();
+
+```
+
+Doublet Detection
+```{r eval=FALSE}
+
+#################################################################################
+# processing
+#################################################################################
+
+# processing:
+seurat_obj <- NormalizeData(seurat_obj)
+seurat_obj <- ScaleData(seurat_obj, features=rownames(seurat_obj))
+seurat_obj <- FindVariableFeatures(seurat_obj, nfeatures=3500)
+VariableFeatures(seurat_obj) <- VariableFeatures(seurat_obj)[!grepl("^mt-", VariableFeatures(seurat_obj))]
+
+# dim reduction
+seurat_obj <- RunPCA(seurat_obj, features=VariableFeatures(seurat_obj))
+seurat_obj <- RunHarmony(seurat_obj, dims=1:30, group.by='SampleID')
+seurat_obj <- RunUMAP(seurat_obj, reduction='harmony', dims = 1:30, n.neighbors=15L, min.dist=0.10)
+
+# clustering
+seurat_obj <- FindNeighbors(seurat_obj, dims=1:30, reduction='harmony', annoy.metric='cosine')
+seurat_obj <- FindClusters(seurat_obj, resolution = 1)
+
+# plot umap
+p1 <- DimPlot(seurat_obj, group.by='seurat_clusters', label=TRUE) + umap_theme + NoLegend() + ggtitle('seurat clusters') + theme(plot.title = element_text(hjust = 0.5))
+p2 <- FeaturePlot(seurat_obj,features='nCount_RNA') + umap_theme
+
+pdf(paste0(fig_dir, 'umap_clusters_preDoubletFiltering.pdf'), width=10, height=5)
+p1 + p2
+dev.off()
+
+
+#################################################################################
+# detect doublets
+#################################################################################
+
+## pK Identification (no ground-truth) ---------------------------------------------------------------------------------------
+sweep.res.list <- paramSweep_v3(seurat_obj, PCs = 1:10, sct = FALSE)
+sweep.stats <- summarizeSweep(sweep.res.list, GT = FALSE)
+bcmvn <- find.pK(sweep.stats)
+
+## Homotypic Doublet Proportion Estimate -------------------------------------------------------------------------------------
+homotypic.prop <- modelHomotypic(seurat_obj$seurat_clusters)
+nExp_poi <- round(0.075*nrow(seurat_obj@meta.data))  ## Assuming 7.5% doublet formation rate - tailor for your dataset
+nExp_poi.adj <- round(nExp_poi*(1-homotypic.prop))
+
+## Run DoubletFinder with varying classification stringencies ----------------------------------------------------------------
+seurat_obj <- doubletFinder_v3(seurat_obj, PCs = 1:10, pN = 0.25, pK = 0.09, nExp = nExp_poi, reuse.pANN = FALSE, sct = FALSE)
+seurat_obj <- doubletFinder_v3(seurat_obj, PCs = 1:10, pN = 0.25, pK = 0.09, nExp = nExp_poi.adj, reuse.pANN = "pANN_0.25_0.09_4170", sct = FALSE)
+seurat_obj$Doublet <- seurat_obj$DF.classifications_0.25_0.09_4170
+
+# plot doublets on UMAP:
+p <- DimPlot(seurat_obj,  group.by='Doublet', split.by='Doublet') + umap_theme
+pdf(paste0(fig_dir, 'umap_doublets.pdf'), width=10, height=5)
+p
+dev.off()
+
+# expression of marker genes
+marker_list <- list(
+  'EX' = c('Slc17a7', 'Lamp5', 'Rorb', 'Snap25', 'Dlg4'),
+  'INH' = c('Gad1', 'Gad2', 'Slc32a1', 'Vip', 'Sst', 'Pvalb'),
+  'ASC' = c('Aqp4', 'Gfap', 'Slc7a10', 'Prdm16', 'Tnc', 'S100b', 'Slc1a2'),
+  'MG' = c('Csf1r', 'Cx3cr1'),
+  'Mature-ODC' = c('Mog', 'Klk6', 'Mobp'),
+  'Mf-ODC' = c('Opalin', 'Plp1', 'Cnp', 'Sox10'),
+  'Nf-ODC' = c('Tcf7l2', 'Itpr2', 'Tmem2'),
+  'COP' = c('Sox6', 'Nkx2-2', 'Bmp4', 'Vcan'),
+  'OPC' = c('Pdgfra', 'Cspg4', 'Ptprz1'),
+  'VLMC' = c('Vtn', 'Slc47a1', 'Slc6a13'),
+  'OEC' = c('Mybpc1'),
+  'END' = c('Rgs5'),
+  'EPD' = c('Dnah11'),
+  'other' = c('Spp1', 'Aif1')
+)
+
+p <- DotPlot(seurat_obj, features=as.character(unlist(marker_list))) + coord_flip() + RotatedAxis() + scale_color_gradientn(colors=rev(viridis(256))) + ylab('') + xlab('')
+pdf(paste0(fig_dir, 'dotplot_markers_preDoubletFiltering.pdf'), width=12, height=12, useDingbats=FALSE)
+p
+dev.off()
+
+#################################################################################
+# filter doublets and re-process
+#################################################################################
+
+# seurat_full <- seurat_obj
+saveRDS(seurat_full, file=paste0(data_dir, 'FIRE_mouse_seurat_DoubletFinder.rds'))
+seurat_obj <- subset(seurat_obj, Doublet == 'Singlet')
+
+seurat_obj <- FindVariableFeatures(seurat_obj, nfeatures=3500)
+VariableFeatures(seurat_obj) <- VariableFeatures(seurat_obj)[!grepl("^mt-", VariableFeatures(seurat_obj))]
+
+# dim reduction
+seurat_obj <- RunPCA(seurat_obj, features=VariableFeatures(seurat_obj))
+seurat_obj <- RunHarmony(seurat_obj, dims=1:30, group.by='SampleID')
+seurat_obj <- RunUMAP(seurat_obj, reduction='harmony', dims = 1:30, n.neighbors=15L, min.dist=0.10)
+
+# clustering
+seurat_obj <- FindNeighbors(seurat_obj, dims=1:30, reduction='harmony', annoy.metric='cosine')
+seurat_obj <- FindClusters(seurat_obj, resolution = 0.25)
+
+# save
+saveRDS(seurat_obj, file=paste0(data_dir, 'FIRE_mouse_seurat_noDoublets.rds'))
+
+
+p1 <- DimPlot(seurat_obj, group.by='seurat_clusters', label=TRUE) + umap_theme + NoLegend() + ggtitle('seurat clusters') + theme(plot.title = element_text(hjust = 0.5))
+p2 <- FeaturePlot(seurat_obj,features='nCount_RNA') + umap_theme
+
+pdf(paste0(fig_dir, 'umap_clusters_postDoubletFiltering.pdf'), width=10, height=5)
+p1 + p2
+dev.off()
+
+# marker gene dotplot
+p <- DotPlot(seurat_obj, features=as.character(unlist(marker_list))) + coord_flip() + RotatedAxis() + scale_color_gradientn(colors=rev(viridis(256))) + ylab('') + xlab('')
+pdf(paste0(fig_dir, 'dotplot_markers_postDoubletFiltering.pdf'), width=12, height=12, useDingbats=FALSE)
+p
+dev.off()
+
+```
+
+
+Transfer this scanpy data over to Seurat obj:
+```{r eval=FALSE}
+
+# save data matrix:
+X <- GetAssayData(seurat_obj, assay='RNA', slot='data')
+Matrix::writeMM(X, file=paste0(data_dir, 'FIRE_mouse_normCounts.mtx'))
+
+# save gene names:
+write.table(
+  data.frame('gene'=rownames(X)),
+  file=paste0(data_dir, 'gene_names.csv'),
+  quote=F,
+  row.names=F,
+  col.names=F
+)
+
+# save harmony matrix as csv
+write.csv(seurat_obj@reductions$harmony@cell.embeddings, file=, paste0(data_dir, 'FIRE_mouse_harmony.csv'), quote=F, row.names=F)
+
+# save metadata:
+meta <- seurat_obj@meta.data
+meta$barcode <- colnames(seurat_obj)
+meta$UMAP1 <- seurat_obj@reductions$umap@cell.embeddings[,1]
+meta$UMAP2 <- seurat_obj@reductions$umap@cell.embeddings[,2]
+
+write.csv(meta, file=paste0(data_dir, 'FIRE_mouse_meta.csv'), quote=F, row.names=F)
+
+
+
+```
+
+
+Compute UMAP & clusters with scanpy:
+
+```{python eval=FALSE}
+
+
+import scanpy as sc
+import anndata
+from scipy import io
+from scipy.sparse import coo_matrix, csr_matrix
+import numpy as np
+import seaborn as sns
+from matplotlib import pyplot as plt
+import os
+import pandas as pd
+
+data_dir = "data/"
+fig_dir = "figures/"
+
+# load sparse matrix:
+X = io.mmread("{}FIRE_mouse_normCounts.mtx".format(data_dir))
+
+# create anndata object
+adata = anndata.AnnData(
+    X=X.transpose().tocsr()
+)
+
+# load sample metadata:
+sample_meta = pd.read_csv("{}FIRE_mouse_meta.csv".format(data_dir))
+
+# load gene names:
+with open("{}gene_names.csv".format(data_dir), 'r') as f:
+    gene_names = f.read().splitlines()
+
+adata.obs = sample_meta
+adata.obs.index = adata.obs['barcode']
+adata.obs = adata.obs.drop(labels='barcode', axis=1)
+adata.var.index = gene_names
+
+# load pca:
+pca = pd.read_csv("{}FIRE_mouse_harmony.csv".format(data_dir))
+pca.index = adata.obs.index
+
+# set pca and umap
+adata.obsm['X_pca'] = pca.to_numpy()
+adata.obsm['X_umap'] = np.vstack((adata.obs['UMAP1'].to_numpy(), adata.obs['UMAP2'].to_numpy())).T
+
+# compute umap with scanpy:
+sc.pp.neighbors(adata, n_neighbors=15, n_pcs=30, metric='cosine')
+sc.tl.umap(adata, min_dist=0.1)
+sc.pl.umap(adata, color='DX', save='_scanpy.pdf', frameon=False)
+
+# correct with PAGA:
+sc.pp.neighbors(adata, n_neighbors=15, n_pcs=30, metric='cosine')
+sc.tl.leiden(adata, resolution=1.5)
+adata.obs['leiden_res1.5'] = adata.obs['leiden']
+sc.tl.paga(adata)
+sc.pl.paga(
+    adata, threshold=0.3, title='', edge_width_scale=0.5,
+    frameon=False, save=True
+)
+
+# re-compute UMAP
+sc.tl.umap(adata, min_dist=0.15, init_pos='paga')
+sc.pl.umap(adata, color=['leiden'], save='_paga_leiden.pdf', frameon=False, legend_loc='on data')
+sc.pl.umap(adata, color=['clusternum_anno'], save='_paga_old_clusters.pdf', frameon=False)
+
+# compute low-res leiden clusters
+sc.tl.leiden(adata, resolution=0.7)
+adata.obs['leiden_res0.7'] = adata.obs['leiden']
+
+# compare scanpy clusters with seurat clusters:
+sc.pl.umap(adata, color=['clusternum_anno', 'leiden_res0.7', 'leiden_res1.5'], save='_paga_compare_clusters.pdf', frameon=False, legend_loc='on data')
+
+# save anndata object
+adata.write('{}FIRE_mouse_scanpy.h5ad'.format(data_dir))
+
+# save cluster assignments and UMAP coordinates for Seurat
+adata.obs['paga_UMAP1'] = adata.obsm['X_umap'][:,0]
+adata.obs['paga_UMAP2'] = adata.obsm['X_umap'][:,1]
+adata.obs.to_csv('{}scanpy_meta.csv'.format(data_dir))
+
+
+```
+
+
+Transfer this scanpy data over to Seurat obj:
+```{r eval=FALSE}
+
+scanpy_meta <- read.csv(paste0(data_dir,'scanpy_meta.csv'))
+seurat_obj$leiden_res0.7 <- factor(scanpy_meta$leiden_res0.7, levels=min(scanpy_meta$leiden_res0.7):max(scanpy_meta$leiden_res0.7))
+seurat_obj$leiden_res1.5 <- factor(scanpy_meta$leiden_res1.5, levels=min(scanpy_meta$leiden_res1.5):max(scanpy_meta$leiden_res1.5))
+# Idents(seurat_obj) <- seurat_obj$leiden_res0.7
+
+paga_umap <- as.matrix(select(scanpy_meta, c(paga_UMAP1, paga_UMAP2)))
+rownames(paga_umap) <- colnames(seurat_obj)
+seurat_obj@reductions$paga_umap <-  CreateDimReducObject(
+    embeddings=paga_umap,
+    key="umap_",
+    assay="RNA"
+)
+
+# save seurat obj:
+saveRDS(seurat_obj, paste0(data_dir, 'FIRE_mouse_seurat.rds'))
+
+# UMAP + Clusters
+p1 <- DimPlot(seurat_obj, label=TRUE, reduction='paga_umap', group.by='leiden_res0.7') + umap_theme + NoLegend()
+p2 <- DimPlot(seurat_obj, label=TRUE, reduction='paga_umap', group.by='leiden_res1.5') + umap_theme + NoLegend()
+p3 <- DimPlot(seurat_obj, label=TRUE, reduction='paga_umap', group.by='clusternum_anno') + umap_theme + NoLegend()
+
+pdf(paste0(fig_dir, 'umap_clusters_leiden.pdf'), width=7, height=7)
+p1
+p2
+p3
+dev.off()
+
+p <- DotPlot(seurat_obj, features=as.character(unlist(marker_list)), group.by='leiden_res1.5') + coord_flip() + RotatedAxis() + scale_color_gradientn(colors=rev(viridis(256))) + ylab('') + xlab('')
+pdf(paste0(fig_dir, 'dotplot_markers_leiden.pdf'), width=12, height=12, useDingbats=FALSE)
+p
+dev.off()
+
+
+```
+
+Plot srebf1 and plp1 in rosenberg data for vivek:
+
+```{r eval=FALSE}
+rosenberg <- readRDS('~/swaruplab/smorabit/collab/Harvard_visium/rosenberg_2018/data/rosenberg_seurat_processed.rds')
+rosenberg$tissue <- ifelse(grepl('brain', rosenberg$sample_type), 'brain', 'spinal')
+
+
+# plot Srebf1 and Plp1 for vivek:
+p <- VlnPlot(rosenberg, group.by='cluster_assignment', features=c('Srebf1', 'Plp1'), split.by='tissue', pt.size=0, combine=FALSE)
+p <- VlnPlot(seurat_obj, group.by='clusternum_anno', features=c('Srebf1', 'Plp1'), pt.size=0, combine=FALSE) + NoLegend()
+
+pdf(paste0(fig_dir, 'vlnplot_rosenberg_srebf1.pdf'), width=16, height=6)
+p
+dev.off()
+
+```
+
+
+Rosenberg label transfer
+
+
+```{r eval=FALSE}
+
+rosenberg <- readRDS('~/swaruplab/smorabit/collab/Harvard_visium/rosenberg_2018/data/rosenberg_brain_seurat_processed.rds')
+
+
+
+# keep genes in rosenberg that are in seurat_obj:
+rosenberg <- rosenberg[rownames(rosenberg)[rownames(rosenberg) %in% rownames(seurat_obj)],]
+
+# compute UMAP for rosenberg:
+rosenberg <- RunUMAP(rosenberg, reduction='pca', dims = 1:30, n.neighbors=15L, min.dist=0.10)
+
+p1 <- DimPlot(rosenberg, group.by='cluster_assignment', label=TRUE) + umap_theme + NoLegend()
+p2 <- FeaturePlot(rosenberg,features='nCount_RNA') + umap_theme
+
+pdf(paste0(fig_dir, 'umap_clusters_rosenberg.pdf'), width=12, height=12)
+p1
+p2
+dev.off()
+
+
+# makrer gene dotplot
+p <- DotPlot(rosenberg, features=as.character(unlist(marker_list))) + coord_flip() + RotatedAxis() + scale_color_gradientn(colors=rev(viridis(256))) + ylab('') + xlab('')
+pdf(paste0(fig_dir, 'dotplot_markers_rosenberg.pdf'), width=20, height=10, useDingbats=FALSE)
+p
+dev.off()
+
+# transfer anchors between ros and seurat_obj:
+anchors <- FindTransferAnchors(
+  reference = rosenberg,
+  query = seurat_obj
+)
+saveRDS(anchors, 'data/anchors.rds')
+anchors <- readRDS('data/anchors.rds')
+
+# make predictions using anchors:
+predictions.assay <- TransferData(
+  anchorset = anchors,
+  refdata = rosenberg$cluster_assignment,
+  prediction.assay = TRUE,
+  weight.reduction = seurat_obj[["harmony"]]
+)
+
+# add to seurat obj
+seurat_obj[["predictions"]] <- predictions.assay
+saveRDS(seurat_obj, file=paste0(data_dir, 'FIRE_mouse_seurat_noDoublets.rds'))
+
+```
+
+
+
+Plot prediction scores:
+
+```{r eval=FALSE}
+
+
+dir.create(paste0(fig_dir, 'rosenberg_label_transfer'))
+
+# Plot prediction scores for some clusters:
+DefaultAssay(seurat_obj) <- "predictions"
+prediction_matrix <- GetAssayData(seurat_obj, assay='predictions')
+
+p1 <- DimPlot(seurat_obj, label=TRUE, group.by='leiden_res1.5', reduction='paga_umap') + umap_theme + NoLegend()
+for(label in rownames(seurat_obj)[rowSums(prediction_matrix) > 0]){
+
+  name <- gsub(' ', '_', label)
+  name <- gsub('/', '_', label)
+  print(name)
+
+  # umap feature plot
+  p2 <- FeaturePlot(seurat_obj, features=label, order=TRUE, reduction='paga_umap') +
+    scale_color_gradientn(colors=colfunc(256), guide = guide_colorbar(barwidth=15, barheight=0.5, ticks=FALSE)) +
+    umap_theme + theme(legend.position='bottom')
+
+
+  # cluster violin plot:
+  p3 <- VlnPlot(seurat_obj, features=label, pt.size=0, group.by='leiden_res1.5') +
+   NoLegend() + ggtitle('') +
+   ylab(paste(label, 'score')) + xlab('clusters')
+
+  # patchwork
+  patch <- (p1 + p2) / p3
+
+  pdf(paste0(fig_dir, 'rosenberg_label_transfer/', name, '.pdf'), width=9, height=9, useDingbats=FALSE)
+  print(patch + plot_layout(heights=c(2,1)))
+  dev.off()
+}
+
+# DotPlot for all prediction scores:
+
+
+p <- DotPlot(
+  seurat_obj, group.by='leiden_res1.5',
+  features=rownames(seurat_obj)[order(rownames(seurat_obj))]
+) + coord_flip() + RotatedAxis() + scale_color_gradientn(colors=rev(prediction.colfunc(256))) + ylab('') + xlab('')
+pdf(paste0(fig_dir, 'rosenberg_label_transfer/prediction_dotplot.pdf'), width=12, height=12, useDingbats=FALSE)
+p
+dev.off()
+
+
+```
+
+
+
+Cluster Annotations
+```{r eval=FALSE}
+
+annot_df <- read.csv('~/swaruplab/smorabit/analysis/FIRE_mouse_2021/data/FIRE_cluster_annotation.csv',)
+seurat_obj$class <- annot_df$class[match(as.numeric(as.character(seurat_obj$leiden_res1.5)), annot_df$cluster_num)]
+seurat_obj$cluster_name <- annot_df$full_name[match(as.numeric(as.character(seurat_obj$leiden_res1.5)), annot_df$cluster_num)]
+seurat_obj$clusternum_anno <- paste0(as.numeric(as.character(seurat_obj$leiden_res1.5)), '-', as.character(seurat_obj$cluster_name))
+
+seurat_obj$leiden_res1.5 <- droplevels(seurat_obj$leiden_res1.5)
+seurat_obj$class <- droplevels(seurat_obj$class)
+seurat_obj$cluster_name <- droplevels(seurat_obj$cluster_name)
+
+
+saveRDS(seurat_obj, paste0(data_dir, 'FIRE_mouse_seurat.rds'))
+
+
+p1 <- DimPlot(seurat_obj, group.by='clusternum_anno', label=TRUE, repel=TRUE, reduction='paga_umap') + umap_theme +
+  theme(legend.position='bottom')
+
+p2 <- DimPlot(seurat_obj, group.by='clusternum_anno', label=TRUE, repel=TRUE, reduction='umap') + umap_theme +
+  theme(legend.position='bottom')
+pdf(paste0(fig_dir, 'umap_clusters_annotated.pdf'), width=9, height=9)
+p1 + NoLegend()
+p2 + NoLegend()
+dev.off()
+
+```
+
+Compare with 4 conditions analysis:
+
+```{r eval=FALSE}
+
+seurat_4conditions <- readRDS("../4-conditions/data/FIRE_mouse_seurat_4_conditions.rds")
+
+all.equal(rownames(seurat_obj@meta.data[rownames(seurat_obj@meta.data) %in% rownames(seurat_4conditions@meta.data),]), rownames(seurat_4conditions@meta.data))
+
+# transfer cluster names over:
+seurat_obj$clusters_4conditions <- as.character(seurat_4conditions$clusternum_anno)[match(rownames(seurat_obj@meta.data), rownames(seurat_4conditions@meta.data))]
+
+
+p1 <- DimPlot(seurat_obj, group.by='clusters_4conditions', label=TRUE, repel=TRUE, reduction='paga_umap') + umap_theme +
+  theme(legend.position='bottom')
+
+
+pdf(paste0(fig_dir, 'umap_clusters_4conditions.pdf'), width=9, height=9)
+p1 + NoLegend()
+dev.off()
+
+
+################################################################################
+# re-name based on cortical layers:
+################################################################################
+
+# re-name cortical EX clusters:
+annot_df <- data.frame(
+  cluster = c(2, 6, 8, 9, 10, 13, 14, 22, 28, 30, 33, 39 ),
+  annotation = c(
+    'L2/3',
+    'L5/6',
+    'L5',
+    'L4',
+    'L2/3',
+    'L2/3',
+    'L5/6',
+    'L5/6',
+    'L2/3/4',
+    'L5/6',
+    'L2/3',
+    'L2/3/4'
+  ),
+  stringsAsFactors=FALSE
+)
+
+
+seurat_obj$cortical_layer <- annot_df$annotation[match(as.numeric(as.character(seurat_obj$leiden_res1.5)), annot_df$cluster)]
+
+seurat_obj$clusternum_anno <- ifelse(
+  is.na(seurat_obj$cortical_layer), as.character(seurat_obj$clusternum_anno),
+  paste(as.character(seurat_obj$clusternum_anno), seurat_obj$cortical_layer)
+)
+
+p1 <- DimPlot(seurat_obj, group.by='clusternum_anno', label=TRUE, repel=TRUE, reduction='paga_umap') + umap_theme +
+  theme(legend.position='bottom')
+
+pdf(paste0(fig_dir, 'umap_clusters_annotated_layers.pdf'), width=9, height=9)
+p1 + NoLegend()
+dev.off()
+
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+Plot one gene for Matt
+
+```{r eval=FALSE}
+
+
+seurat_5xFAD <- readRDS(file="/dfs3b/swaruplab/smorabit/analysis/AD_NucSeq_2019/batch_correction/liger/update/mouse_integration/data/zhou_5xFAD_ProcessedSeuratFinal.rds")
+
+# load stroke mouse data
+stroke <- readRDS('~/swaruplab/smorabit/collab/carmichael/analysis/data/stroke_mouse_all_samples_sct.rds')
+
+comparisons <- list(c(2,1), c(5,3),  c(3,1), c(5,1))
+
+
+# plot sgsh in each group for all cells:
+seurat_obj$DX <- factor(
+  as.character(seurat_obj$DX),
+  levels=rev(levels(seurat_obj$DX))
+)
+
+p1 <- VlnPlot(seurat_obj, features='Sgsh', group.by='DX', pt.size=0.5) + NoLegend() +
+  stat_compare_means(method='wilcox', comparisons=comparisons) + ggtitle('') + xlab('') + ylim(c(0,4.5))
+
+p2 <- VlnPlot(seurat_5xFAD, features='Sgsh', group.by='Cell.Types', pt.size=0.5) + NoLegend() +
+  ggtitle('Zhou et al 2020 data') + xlab('Cell Types')
+
+p3 <- VlnPlot(stroke, features='Sgsh', group.by='celltype', pt.size=0.5, assay='RNA', slot='data') + NoLegend() +
+  ggtitle('scRNA mouse data') + xlab('Cell Types')
+
+
+
+pdf(paste0(fig_dir, 'vlnplot_sgsh.pdf'), width=10, height=6)
+p1
+p2
+p3
+dev.off()
+
+# plot spp1 in all clusters:
+
+p1 <- VlnPlot(seurat_obj, features='Spp1', group.by='clusternum_anno', pt.size=0) + NoLegend()
+pdf(paste0(fig_dir, 'vlnplot_Spp1.pdf'), width=10, height=6)
+p1
+
+dev.off()
+
+# plot Pdgfrb in all clusters:
+p1 <- VlnPlot(seurat_obj, features='Pdgfrb', group.by='clusternum_anno', pt.size=0) + NoLegend()
+pdf(paste0(fig_dir, 'vlnplot_Pdgfrb.pdf'), width=10, height=6)
+p1
+dev.off()
+
+# plot Pdgfb in all clusters:
+p1 <- VlnPlot(seurat_obj, features='Pdgfb', group.by='clusternum_anno', pt.size=0) + NoLegend()
+pdf(paste0(fig_dir, 'vlnplot_Pdgfb.pdf'), width=10, height=6)
+p1
+dev.off()
+
+p1 <- VlnPlot(seurat_obj, features='Pdgfb', group.by='clusternum_anno', split.by='DX', pt.size=0) + scale_fill_manual(values=sample_color.scheme)
+pdf(paste0(fig_dir, 'vlnplot_Pdgfb_split.pdf'), width=20, height=5)
+p1
+dev.off()
+
+```
+
+
+Look at pericyte marker genes:
+
+```{r eval=FALSE}
+
+pericyte_markers <- c(
+  'Vtn', 'Foxf2', 'Foxc1','Cspg4', 'Anpep', 'Sparc', 'Pdgfrb', 'Des', 'Mcam', 'Acta2',
+  'Kcnj8', 'Cd248', 'Dlk1', 'Zic1', 'Abcc9', 'Rgs5'
+)
+
+p <- DotPlot(seurat_obj, group.by='clusternum_anno', features=pericyte_markers) + coord_flip() + RotatedAxis() + scale_color_gradientn(colors=rev(viridis(256))) + ylab('') + xlab('')
+pdf(paste0(fig_dir, 'dotplot_markers_pericyte.pdf'), width=12, height=6, useDingbats=FALSE)
+p
+dev.off()
+
+
+
+seurat_obj$DX <- factor(
+  as.character(seurat_obj$DX),
+  levels=rev(levels(seurat_obj$DX))
+)
+head(seurat_obj$DX)
+
+p1 <- VlnPlot(subset(seurat_obj, leiden_res1.5==21), features='Pdgfrb', group.by='DX', pt.size=0.5, cols=sample_color.scheme) + NoLegend() +
+  ggtitle('Pdgfrb expression') + theme(plot.title = element_text(hjust = 0.5)) +
+  stat_compare_means(method='wilcox', comparisons=comparisons) + ggtitle('') + xlab('') + ylim(c(0,6))
+
+pdf(paste0(fig_dir, 'vlnplot_Pdgfrb.pdf'), width=6, height=6)
+p1
+dev.off()
+
+
+```
+
+Plot DAM scores:
+
+
+```{r eval=FALSE}
+
+
+homeostatic <- str_to_title(c('HEXB', 'CST3', 'CX3CR1', 'CTSD', 'CSF1R', 'CTSS', 'SPARC', 'TMSB4X', 'P2RY12', 'C1QA', 'C1QB'))
+stage1_DAM <- str_to_title(c('TYROBP', 'CTSB', 'APOE', 'B2M', 'FTH1'))
+stage2_DAM <- str_to_title(c('TREM2', 'AXL', 'CST7', 'CTSL', 'LPL', 'CD9', 'CSF1', 'ITGAX', 'CLEC7A', 'LILRB4', 'TIMP2'))
+
+seurat_imm <- subset(seurat_obj, class == 'IMM')
+
+seurat_imm <- AddModuleScore(
+  seurat_imm,
+  features=list('stage1_DAM'=stage1_DAM, 'stage2_DAM'=stage2_DAM, 'homeostatic'=homeostatic),
+  name=c('stage1_DAM', 'stage2_DAM', 'homeostatic')
+)
+
+
+comparisons <- list(c(2,4), c(1,3), c(1,2), c(6,2))
+
+p1 <- VlnPlot(seurat_imm, features='homeostatic3', group.by='DX', pt.size=0) + scale_fill_manual(values=sample_color.scheme) +
+geom_hline(yintercept = 0, linetype='dashed') +
+stat_summary(fun.data='mean_cl_boot', color='black') +
+stat_compare_means(method='wilcox', comparisons=comparisons, label='p.signif') +
+xlab('') + NoLegend() +
+ylim(c(-0.5,2.75))+ ggtitle('Homeostatic')
+
+p2 <- VlnPlot(seurat_imm, features='stage1_DAM1', group.by='DX', pt.size=0) + scale_fill_manual(values=sample_color.scheme) +
+geom_hline(yintercept = 0, linetype='dashed') +
+stat_summary(fun.data='mean_cl_boot', color='black') +
+stat_compare_means(method='wilcox', comparisons=comparisons, label='p.signif') +
+xlab('') + NoLegend() +
+ylim(c(-0.5,2.75))+ ggtitle('Stage 1 DAM')
+
+p3 <- VlnPlot(seurat_imm, features='stage2_DAM2', group.by='DX', pt.size=0) + scale_fill_manual(values=sample_color.scheme) +
+geom_hline(yintercept = 0, linetype='dashed') +
+stat_summary(fun.data='mean_cl_boot', color='black') +
+stat_compare_means(method='wilcox', comparisons=comparisons, label='p.signif') +
+xlab('') + NoLegend() +
+ylim(c(-0.5,2.75)) + ggtitle('Stage 2 DAM')
+
+
+pdf(paste0(fig_dir, 'vlnplot_DAM_DX_with_transplant.pdf'), width=8, height=4)
+p1 | p2 | p3
+dev.off()
+
+
+
+```
+
+Plot genes for Sep from that one new paper:
+
+```{r eval=FALSE}
+
+endo_genes <- c('Slc7a5', 'Alpl', 'Il1r1', 'Hsph1', 'Slc12a7', 'Lamc3', 'Ctnna3', 'Acta2')
+
+plot_list <- VlnPlot(seurat_obj, group.by='clusternum_anno', features=endo_genes, combine=F, pt.size=0) +
+for(i in 1:length(plot_list)){
+  plot_list[[i]] <- plot_list[[i]] + NoLegend()
+}
+
+
+pdf(paste0(fig_dir, 'vlnplot_endo_markers.pdf'), width=10, height=5)
+plot_list
+dev.off()
+
+
+gene_list <- c('Slc7a5', 'Alpl', 'Il1r1', 'Hsph1', 'Slc12a7', 'Lamc3', 'Ctnna3', 'Acta2')
+
+plot_list <- list()
+for(gene in gene_list){
+  plot_list[[gene]] <- VlnPlot(seurat_obj, group.by='clusternum_anno', features=gene, pt.size=0) +
+  stat_summary(fun.data='mean_cl_boot', color='black', size=0.5) +
+  NoLegend() +
+  xlab('') + ylab(gene) + ggtitle('') +
+  theme(axis.title.y=element_text(face='bold.italic'))
+
+  if(gene == gene_list[length(gene_list)]){
+    theme(
+        axis.line.x=element_blank(),
+        axis.ticks.x=element_blank()
+      )
+  } else{
+    plot_list[[gene]] <- plot_list[[gene]] +
+    theme(
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank()
+      )
+  }
+}
+
+pdf(paste0(fig_dir, 'vlnplot_endo_markers.pdf'), width=10, height=10)
+wrap_plots(plot_list, ncol=1) & theme(
+    plot.margin = unit(c(0, 0, 0, 0.1), "in")
+)
+dev.off()
+
+
+```
+
+Pericyte Subclusters?
+
+```{r eval=FALSE}
+
+seurat_per <- seurat_obj %>% subset(class == 'PER')
+
+seurat_per <- RunPCA(seurat_per)
+seurat_per <- RunHarmony(seurat_per, dims=1:20, group.by='SampleID')
+seurat_per <- RunUMAP(seurat_per, reduction='harmony', dims = 1:30, n.neighbors=15L, min.dist=0.25)
+seurat_per <- FindNeighbors(seurat_per, dims=1:15, reduction='harmony', annoy.metric='cosine')
+seurat_per<- FindClusters(seurat_per, resolution = 0.1, algorithm=4)
+
+
+p1 <- DimPlot(seurat_per,  group.by='seurat_clusters', label=TRUE) + NoLegend()+
+  umap_theme
+
+pdf(paste0(fig_dir, 'umap_pericyte_subclusters.pdf'), width=5, height=5)
+p1
+dev.off()
+
+
+# marker genes from wyss-coray lab paper:?
+pericyte_genes <- c(
+  'Slc6a1', 'Slc1a3', 'Slc12a7', 'Slc6a12', 'Slc6a13',
+  'Col4a1-4', 'Lamc3', 'Adamts1', 'Adamts9'
+)
+
+p <- DotPlot(seurat_per, features=markers) + coord_flip() + RotatedAxis() + scale_color_gradientn(colors=rev(viridis(256))) + ylab('') + xlab('')
+
+
+pdf(paste0(fig_dir, 'dotplot_pericyte_subclusters_markers.pdf'), width=5, height=4)
+p
+dev.off()
+
+```
+
+
+
+
+
+
+
+
+
+
+
+Helper function
+
+```{r eval=FALSE}
+
+## remove the x-axis text and tick
+## plot.margin to adjust the white space between each plot.
+## ... pass any arguments to VlnPlot in Seurat
+modify_vlnplot<- function(obj,
+                          feature,
+                          pt.size = 0,
+                          plot.margin = unit(c(-0.75, 0, -0.75, 0), "cm"),
+                          ...) {
+  p<- VlnPlot(obj, features = feature, pt.size = pt.size, ... )  +
+    xlab("") + ylab(feature) + ggtitle("") +
+    theme(legend.position = "none",
+          axis.text.x = element_blank(),
+          axis.ticks.x = element_blank(),
+          axis.title.y = element_text(size = rel(1), angle = 0),
+          axis.text.y = element_text(size = rel(1)),
+          plot.margin = plot.margin )
+  return(p)
+}
+
+## extract the max value of the y axis
+extract_max<- function(p){
+  ymax<- max(ggplot_build(p)$layout$panel_scales_y[[1]]$range$range)
+  return(ceiling(ymax))
+}
+
+
+## main function
+StackedVlnPlot<- function(obj, features,
+                          pt.size = 0,
+                          plot.margin = unit(c(-0.75, 0, -0.75, 0), "cm"),
+                          ...) {
+
+  plot_list<- purrr::map(features, function(x) modify_vlnplot(obj = obj,feature = x, ...))
+
+  # Add back x-axis title to bottom plot. patchwork is going to support this?
+  plot_list[[length(plot_list)]]<- plot_list[[length(plot_list)]] +
+    theme(axis.text.x=element_text(), axis.ticks.x = element_line())
+
+  # change the y-axis tick to only max value
+  ymaxs<- purrr::map_dbl(plot_list, extract_max)
+  plot_list<- purrr::map2(plot_list, ymaxs, function(x,y) x +
+                            scale_y_continuous(breaks = c(y)) +
+                            expand_limits(y = y))
+
+  p<- patchwork::wrap_plots(plotlist = plot_list, ncol = 1)
+  return(p)
+}
+
+```

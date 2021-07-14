@@ -1,0 +1,800 @@
+
+# Load data
+
+```{r eval=FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(cowplot)
+library(Matrix)
+library(viridis)
+library(presto)
+library(harmony)
+library(RColorBrewer)
+library(patchwork)
+library(ggpubr)
+colfunc <- colorRampPalette(rev(brewer.pal(11, 'Spectral' )))
+theme_set(theme_cowplot())
+
+setwd("/dfs3b/swaruplab/smorabit/analysis/FIRE_mouse_2021/scWGCNA")
+
+# directories
+data_dir <- "data/"
+fig_dir <- 'figures/'
+
+umap_theme <- theme(
+  axis.line=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+  axis.title.x=element_blank(),
+  axis.title.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border=element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank()
+)
+
+# re-load data
+seurat_obj <- readRDS('~/swaruplab/smorabit/analysis/FIRE_mouse_2021/data/FIRE_mouse_seurat.rds')
+
+# color scheme for samples:
+color.scheme <- c(
+  brewer.pal(9, 'Reds')[2:9],
+  brewer.pal(9, 'Purples')[2:9],
+  brewer.pal(9, 'Oranges')[2:9],
+  brewer.pal(9, 'Greys')[2:9],
+  brewer.pal(9, 'Blues')[2:9],
+  brewer.pal(9, 'Greens')[2:9]
+)
+names(color.scheme) <- as.character(levels(seurat_obj$SampleID))
+
+sample_color.scheme <- c(
+  brewer.pal(9, 'Greys')[5],
+  brewer.pal(9, 'Purples')[7],
+  brewer.pal(9, 'Oranges')[6],
+  brewer.pal(9, 'Reds')[6],
+  brewer.pal(9, 'Blues')[5],
+  brewer.pal(9, 'Greens')[5]
+)
+names(sample_color.scheme) <- levels(seurat_obj$DX)
+
+
+
+```
+
+Construct metacells:
+
+```{r eval=FALSE}
+
+library(devtools)
+#install_github('smorabit/scWGCNA')
+library(scWGCNA)
+
+
+library(future.apply)
+plan(multiprocess)
+options(future.globals.maxSize= 16*1024^3 )
+
+
+# construct metacells:
+seurat_obj <- subset(seurat_obj, class %in% c('EX', 'INH', 'IMM', 'ASC', 'END', 'PER', 'ODC', 'OPC'))
+seurat_obj$metacell_group <-paste0(
+  as.character(seurat_obj$class), '_',
+  as.character(seurat_obj$DX)
+)
+
+seurat_list <- list()
+groups <- unique(seurat_obj$metacell_group)
+groups <- groups[!groups %in% names(seurat_list)]
+for(gr in groups){
+  print(gr)
+  cur_seurat <- subset(seurat_obj, metacell_group == gr)
+
+  # skip if there's not enough cells
+  if(ncol(cur_seurat) < 50){next}
+
+  #cur_seurat <- cur_seurat[genes.keep,]
+  cur_metacell_seurat <- construct_metacells(
+    cur_seurat, name=gr,
+    k=50, reduction='paga_umap',
+    assay='RNA', slot='data'
+  )
+  cur_metacell_seurat$DX <- as.character(unique(cur_seurat$DX))
+  cur_metacell_seurat$class <- as.character(unique(cur_seurat$class))
+  seurat_list[[gr]] <- cur_metacell_seurat
+}
+
+
+metacell_seurat <- merge(seurat_list[[1]], seurat_list[2:length(seurat_list)])
+#rm(seurat_list)
+
+# process metacell seurat obj
+metacell_seurat <- FindVariableFeatures(metacell_seurat, nfeatures=1000)
+metacell_seurat <- ScaleData(metacell_seurat, features = rownames(metacell_seurat))
+metacell_seurat <- RunPCA(metacell_seurat, features=rownames(metacell_seurat))
+metacell_seurat <- RunHarmony(metacell_seurat, group.by='DX', dims=1:15)
+metacell_seurat <- RunUMAP(metacell_seurat, reduction='harmony', dims=1:15)
+
+pdf(paste0(fig_dir, "metacell_umap_group.pdf"), width=7, height=5)
+DimPlot(metacell_seurat, group.by='DX', reduction='umap') + umap_theme
+DimPlot(metacell_seurat, group.by='class', reduction='umap') + umap_theme
+dev.off()
+
+saveRDS(metacell_seurat, file='data/metacell_seurat.rds')
+
+
+```
+
+scWGCNA
+
+```{r eval=FALSE}
+
+library(WGCNA)
+enableWGCNAThreads()
+library(flashClust)
+
+# read metacell object
+metacell_seurat <- readRDS(file='/dfs3b/swaruplab/smorabit/analysis/FIRE_mouse_2021/scWGCNA/data/metacell_seurat.rds')
+seurat_obj <- readRDS(file='/dfs3b/swaruplab/smorabit/analysis/FIRE_mouse_2021/data/FIRE_mouse_seurat.rds')
+
+# directories
+data_dir <- "data/"
+fig_dir <- 'figures/'
+
+# select celltype:
+cur_celltype <- 'ASC'
+cur_celltype <- 'EX'
+cur_celltype <- 'INH'
+
+cur_metacell <- subset(metacell_seurat, class == cur_celltype)
+cur_seurat <- subset(seurat_obj, class == cur_celltype)
+
+fig_dir <- paste0('figures/', cur_celltype, '/')
+dir.create(fig_dir)
+
+
+# groups with more than one cell type (OPC + ODC, END + PER)
+cur_celltype <- 'ODC'; cur_celltypes <- c('ODC', 'OPC')
+cur_celltype <- 'END'; cur_celltypes <- c('PER', 'END')
+
+fig_dir <- paste0('figures/', cur_celltype, '/')
+dir.create(fig_dir)
+
+cur_metacell <- subset(metacell_seurat, class %in% cur_celltypes)
+cur_seurat <- subset(seurat_obj, class %in% cur_celltypes)
+
+
+genes.use <- VariableFeatures(seurat_obj)
+
+# set up data for WGCNA
+targets <- cur_metacell@meta.data
+group <- as.factor(cur_metacell$DX)
+datExpr <- as.data.frame(GetAssayData(cur_metacell, assay='RNA', slot='data')[genes.use,])
+datExpr <- as.data.frame(t(datExpr))
+datExpr <- datExpr[,goodGenes(datExpr)]
+
+```
+
+
+Network Construction:
+
+```{r eval=FALSE}
+
+# Choose a set of soft-thresholding powers
+powers = c(seq(1,10,by=1), seq(12,30, by=2));
+
+# Call the network topology analysis function for each set in turn
+powerTable = list(
+  data = pickSoftThreshold(
+    datExpr,
+    powerVector=powers,
+    verbose = 100,
+    networkType="signed",
+    corFnc="bicor"
+  )[[2]]
+);
+
+# Plot the results:
+pdf(paste0(fig_dir, cur_celltype,"_power.pdf"), height=7, width=14)
+
+colors = c("blue", "red","black")
+# Will plot these columns of the returned scale free analysis tables
+plotCols = c(2,5,6,7)
+colNames = c("Scale Free Topology Model Fit", "Mean connectivity", "mean connectivity",
+"Max connectivity");
+
+# Get the minima and maxima of the plotted points
+ylim = matrix(NA, nrow = 2, ncol = 4);
+for (col in 1:length(plotCols)){
+  ylim[1, col] = min(ylim[1, col], powerTable$data[, plotCols[col]], na.rm = TRUE);
+  ylim[2, col] = max(ylim[2, col], powerTable$data[, plotCols[col]], na.rm = TRUE);
+}
+
+# Plot the quantities in the chosen columns vs. the soft thresholding power
+par(mfcol = c(2,2));
+par(mar = c(4.2, 4.2 , 2.2, 0.5))
+cex1 = 0.7;
+
+for (col in 1:length(plotCols)){
+  plot(powerTable$data[,1], -sign(powerTable$data[,3])*powerTable$data[,2],
+  xlab="Soft Threshold (power)",ylab=colNames[col],type="n", ylim = ylim[, col],
+  main = colNames[col]);
+  addGrid();
+
+  if (col==1){
+    text(powerTable$data[,1], -sign(powerTable$data[,3])*powerTable$data[,2],
+    labels=powers,cex=cex1,col=colors[1]);
+  } else
+  text(powerTable$data[,1], powerTable$data[,plotCols[col]],
+  labels=powers,cex=cex1,col=colors[1]);
+  if (col==1){
+    legend("bottomright", legend = paste(cur_celltype, 'Metacells'), col = colors, pch = 20) ;
+  } else
+  legend("topright", legend = paste(cur_celltype, 'Metacells'), col = colors, pch = 20) ;
+}
+dev.off()
+
+
+
+```
+
+Construct dendrogram
+
+```{r eval=FALSE}
+
+#EX, INH
+softPower=6
+
+# ASC,
+softPower=8
+
+# END
+softPower = 9
+
+# ODC,
+softPower =10
+
+nSets = 1
+setLabels = cur_celltype
+shortLabels = setLabels
+
+multiExpr <- list()
+multiExpr[[cur_celltype]] <- list(data=datExpr)
+
+checkSets(multiExpr) # check data size
+
+
+net=blockwiseConsensusModules(multiExpr, blocks = NULL,
+                                         maxBlockSize = 30000, ## This should be set to a smaller size if the user has limited RAM
+                                         randomSeed = 12345,
+                                         corType = "pearson", ## no use for bicor
+                                         power = softPower,
+                                         consensusQuantile = 0.3,
+                                         networkType = "signed",
+                                         TOMType = "unsigned",
+                                         TOMDenom = "min",
+                                         scaleTOMs = TRUE, scaleQuantile = 0.8,
+                                         sampleForScaling = TRUE, sampleForScalingFactor = 1000,
+                                         useDiskCache = TRUE, chunkSize = NULL,
+                                         deepSplit = 4,
+                                         pamStage=FALSE,
+                                         detectCutHeight = 0.995, minModuleSize = 50,
+                                         mergeCutHeight = 0.2,
+                                         saveConsensusTOMs = TRUE,
+                                         consensusTOMFilePattern = "ConsensusTOM-block.%b.rda")
+
+
+# rename consensusTOM file:
+file.rename('ConsensusTOM-block.1.rda', paste0('data/', cur_celltype, '_ConsensusTOM-block.1.rda'))
+
+consMEs = net$multiMEs;
+moduleLabels = net$colors;
+
+# Convert the numeric labels to color labels
+moduleColors = as.character(moduleLabels)
+consTree = net$dendrograms[[1]];
+
+# clusters
+MEs=moduleEigengenes(multiExpr[[1]]$data, colors = moduleColors, nPC=1)$eigengenes
+MEs=orderMEs(MEs)
+
+datExpr=multiExpr[[1]]$data
+
+meInfo<-data.frame(rownames(datExpr), MEs)
+colnames(meInfo)[1]= "SampleID"
+KMEs<-signedKME(datExpr, MEs,outputColumnName = "kME",corFnc = "bicor")
+
+#ensembl=ensembl[na.omit(match(colnames(datExpr),ensembl$Gene.stable.ID)),]
+geneInfo=as.data.frame(cbind(colnames(datExpr),moduleColors))
+
+nmodules <- length(unique(moduleColors))
+
+# merged gene symbol column
+colnames(geneInfo)[1]= "GeneSymbol"
+colnames(geneInfo)[2]= "Initially.Assigned.Module.Color"
+
+# add module labels:
+geneInfo$ModuleLabel <- paste0(cur_celltype, '-M', as.numeric(as.factor(geneInfo$Initially.Assigned.Module.Color)))
+
+geneInfo=cbind(geneInfo, KMEs)
+
+write.csv(geneInfo,file=paste0('data/', cur_celltype, '_geneInfoSigned.csv'))
+
+PCvalues=MEs
+
+table(moduleColors)
+
+# save all of the necessary WGCNA stuff:
+save(moduleLabels, moduleColors, MEs, KMEs, PCvalues, file=paste0('data/', cur_celltype, '_WGCNA_variables.rda'))
+
+```
+
+
+## Plot Dendrogram
+
+```{r eval=FALSE}
+
+pdf(paste0(fig_dir, cur_celltype, "_SignedDendro_Consensus.pdf"),height=5, width=8)
+plotDendroAndColors(consTree, moduleColors, "Module colors", dendroLabels = FALSE, hang = 0.03, addGuide = TRUE, guideHang = 0.05,
+main = paste0(cur_celltype, " gene dendrogram and module colors"))
+dev.off()
+
+```
+
+
+## plot ME trajectories
+
+```{r eval=FALSE}
+
+# re-load stuff
+load(file=paste0('data/', cur_celltype, '_WGCNA_variables.rda'))
+geneInfo <- read.csv(paste0(data_dir, cur_celltype, '_geneInfoSigned.csv'), stringsAsFactors=FALSE)
+
+library(ggpubr)
+
+#################################################################
+# cluster + condition MEs
+#################################################################
+
+plot_df <- cbind(dplyr::select(targets, c(class, DX)), PCvalues)
+plot_df <- melt(plot_df, id.vars = c('class', 'DX'))
+plot_df$DX <- factor(plot_df$DX, levels=levels(seurat_obj$DX))
+
+# remove gray from plot:
+plot_df <- subset(plot_df, variable != 'MEgrey')
+
+comparisons <- list(c(6,5), c(6,4),  c(4,2), c(6,2))
+
+p <- ggplot(plot_df, aes(x=DX, y=value, fill=DX)) +
+  geom_jitter(shape=16, position=position_jitter(0.2), aes(color=value), alpha=0.8) +
+  scale_color_gradient2(low=scales::muted('blue'), mid='lightgrey', high=scales::muted('red')) +
+  geom_boxplot(notch=FALSE, alpha=0.8, outlier.shape=NA) +
+  scale_fill_manual(values=sample_color.scheme) +
+  RotatedAxis() + ylab('Module Eigengene') + xlab('') +
+  theme(
+    axis.text.x=element_blank(),
+    axis.ticks.x=element_blank(),
+  )
+
+pdf(paste0(fig_dir, cur_celltype, '_ME_trajectory_Plot_DX.pdf'),width=10,height=10,useDingbats=F)
+p + facet_wrap(~variable, scales='free', ncol=3) +
+  stat_compare_means(method='wilcox', comparisons=comparisons, label='p.signif')
+dev.off()
+
+# plot individually:
+pdf(paste0(fig_dir, cur_celltype, '_ME_trajectory_Plot_DX_individual.pdf'),width=5,height=5,useDingbats=F)
+plot_list <- list()
+for(module in unique(plot_df$variable)){
+
+  cur <- subset(plot_df, variable == module)
+  p <- ggplot(cur, aes(x=DX, y=value, fill=DX)) +
+    geom_jitter(shape=16, position=position_jitter(0.2), aes(color=value), alpha=0.8) +
+    scale_color_gradient2(low=scales::muted('blue'), mid='lightgrey', high=scales::muted('red')) +
+    geom_boxplot(notch=FALSE, alpha=0.8, outlier.shape=NA) +
+    scale_fill_manual(values=sample_color.scheme) +
+    stat_compare_means(method='wilcox', comparisons=comparisons, label='p.signif') +
+    RotatedAxis() + ylab('Module Eigengene') + xlab('') + NoLegend() +
+    ggtitle(module) + theme(plot.title = element_text(hjust = 0.5))
+  print(p)
+
+  plot_list[[module]] <- p
+}
+dev.off()
+
+```
+
+
+## EnrichR
+
+```{r eval=FALSE}
+
+library(enrichR)
+library(simplifyEnrichment)
+library(circlize)
+
+dbs<-c('GO_Biological_Process_2018','GO_Cellular_Component_2018','GO_Molecular_Function_2018','TRANSFAC_and_JASPAR_PWMs','LINCS_L1000_Chem_Pert_up','LINCS_L1000_Chem_Pert_down')
+
+
+# custom helper function
+library(GetoptLong)
+simplifyGO_custom <- function (mat, method = "binary_cut", control = list(), plot = TRUE, term = NULL, verbose = TRUE, column_title = qq("@{nrow(mat)} GO terms clustered by '@{method}'"),
+    ht_list = NULL, my_color=c('white', 'red'), ...)
+{
+    if (is.atomic(mat) && !is.matrix(mat)) {
+        go_id = mat
+        if (!all(grepl("^GO:\\d+$", go_id))) {
+            stop_wrap("If you specify a vector, it should contain all valid GO IDs.")
+        }
+        mat = GO_similarity(go_id)
+    }
+    cl = do.call(cluster_terms, list(mat = mat, method = method,
+        verbose = verbose, control = control))
+    go_id = rownames(mat)
+    if (!all(grepl("^GO:\\d+$", go_id))) {
+        stop_wrap("Please ensure GO IDs are the row names of the similarity matrix and should be matched to '^GO:\\d+$'.")
+    }
+    if (is.null(term)) {
+        suppressMessages(term <- select(GO.db::GO.db, keys = go_id,
+            columns = "TERM")$TERM)
+    }
+    if (plot)
+        ht_clusters(mat, cl, term = term, column_title = column_title,
+            ht_list = ht_list, col = my_color, ...)
+    return(invisible(data.frame(id = go_id, term = term, cluster = cl,
+        stringsAsFactors = FALSE)))
+}
+
+
+
+
+
+uniquemodcolors=as.character(unique(geneInfo$Initially.Assigned.Module.Color))
+uniquemodcolors=uniquemodcolors[uniquemodcolors!='grey']
+
+# run EnrichR
+combined_output <- data.frame()
+for(i in 1:length(uniquemodcolors)){
+  print(i)
+	thismod= uniquemodcolors[i]
+  thisInfo=geneInfo[geneInfo$Initially.Assigned.Module.Color==thismod,]
+  thisInfo=thisInfo[,c('GeneSymbol', paste0('kME', thismod))]
+  geneNames <- top_n(thisInfo, 100) %>% .$GeneSymbol %>% as.character
+  enriched <- enrichr(geneNames,dbs)
+
+  for(db in names(enriched)){
+    cur_df <- enriched[[db]]
+
+    if (nrow(cur_df) > 1){
+      cur_df$db <- db
+      cur_df$module <- thismod
+      combined_output <- rbind(combined_output, cur_df)
+    }
+  }
+}
+
+write.csv(combined_output, file=paste0('data/', cur_celltype, '_scWGCNA_enrichr.csv'), quote=FALSE)
+
+# plot results
+dir.create(paste0(fig_dir, '/enrichR'))
+
+wrapText <- function(x, len) {
+    sapply(x, function(y) paste(strwrap(y, len), collapse = "\n"), USE.NAMES = FALSE)
+}
+
+for(i in 1:length(uniquemodcolors)){
+
+  thismod <- uniquemodcolors[i]
+  print(thismod)
+  cur_terms <- subset(combined_output, module == thismod)
+  cur_terms$wrap <- wrapText(cur_terms$Term, 45)
+
+  # plot top 20 as barplot
+  plot_list <- list()
+  for(cur_db in dbs){
+
+    plot_df <- subset(cur_terms, db==cur_db) %>% top_n(20, wt=Combined.Score)
+
+    plot_list[[cur_db]] <- ggplot(plot_df, aes(y=Combined.Score, x=reorder(wrap, Combined.Score))) +
+            geom_bar(stat='identity', color='black', fill=thismod) +
+            xlab('') +
+            coord_flip() +
+            ggtitle(cur_db)
+
+    # simplify enrichment heatmap for biological process db:
+    if(cur_db == "GO_Biological_Process_2018"){
+      print(paste0(thismod, ' GO clustering'))
+      plot_df <- subset(cur_terms, db==cur_db) %>% top_n(100, wt=Combined.Score)
+      go_id <- as.character(sapply(plot_df$Term, function(j){gsub("[\\(\\)]", "", regmatches(j, gregexpr("\\(.*?\\)", j))[[1]])}))
+      mat = GO_similarity(go_id)
+
+      pdf(paste0(fig_dir, 'enrichR/',cur_celltype, '_', thismod, '_module_goTerm_clusters.pdf'), width=10, height=6)
+
+      # use my own version of this function so we can change the color scheme
+      # df <- simplifyGO(mat)
+      df <- simplifyGO_custom(mat, my_color=c('white', thismod))
+      dev.off()
+
+    }
+
+  }
+
+  pdf(paste0(fig_dir, 'enrichR/',cur_celltype, '_', thismod, '_terms.pdf'), width=7, height=10)
+  for(plot in plot_list){
+    print(plot)
+  }
+  dev.off()
+
+}
+
+
+```
+
+
+## Plot networks:
+
+```{r eval=FALSE}
+
+library(igraph);
+library(RColorBrewer);
+
+load(paste0("data/",cur_celltype, "_ConsensusTOM-block.1.rda"))
+
+TOM.matrix = as.matrix(consTomDS);
+#Get the top connected genes in the module
+uniquemodcolors = unique(geneInfo$Initially.Assigned.Module.Color);
+uniquemodcolors=uniquemodcolors[uniquemodcolors!='grey']
+
+# make output folder:
+dir.create(paste0(fig_dir, 'networks'))
+
+
+pdf(paste0(fig_dir, 'networks/', cur_celltype, '_ModuleNetworks_25.pdf'),height=9,width=10);
+
+for (mod in uniquemodcolors)  {
+ #mod="turquoise"
+  numgenesingraph = 25;
+  numconnections2keep = 500;
+  cat('module:',mod,'\n');
+  geneInfo=geneInfo[geneInfo$GeneSymbol!="NA",]
+  colind = which(colnames(geneInfo)==paste('kME',mod,sep=''));
+  rowind = which(geneInfo$Initially.Assigned.Module.Color==mod);
+  cat(' ',length(rowind),'probes in module\n');
+  submatrix = geneInfo[rowind,];
+  orderind = order(submatrix[,colind],decreasing=TRUE);
+  if (length(rowind) < numgenesingraph) {
+    numgenesingraph = length(rowind);
+    numconnections2keep = numgenesingraph * (numgenesingraph - 1);
+  }
+  cat('Making network graphs, using top',numgenesingraph,'probes and',numconnections2keep,'connections of TOM\n');
+  submatrix = submatrix[orderind[1:numgenesingraph],];
+  #Identify the columns in the TOM that correspond to these hub probes
+  matchind = match(submatrix$GeneSymbol,colnames(datExpr));
+  reducedTOM = TOM.matrix[matchind,matchind];
+
+  orderind = order(reducedTOM,decreasing=TRUE);
+  connections2keep = orderind[1:numconnections2keep];
+  reducedTOM = matrix(0,nrow(reducedTOM),ncol(reducedTOM));
+  reducedTOM[connections2keep] = 1;
+
+  gA <- graph.adjacency(as.matrix(reducedTOM[1:10,1:10]),mode="undirected",weighted=TRUE,diag=FALSE)
+  gB <- graph.adjacency(as.matrix(reducedTOM[11:25,11:25]),mode="undirected",weighted=TRUE,diag=FALSE)
+  layoutCircle <- rbind(layout.circle(gA)/2,layout.circle(gB))
+
+  g1 <- graph.adjacency(as.matrix(reducedTOM),mode="undirected",weighted=TRUE,diag=FALSE)
+
+plot(g1,
+  edge.color=adjustcolor(mod, alpha.f=0.25),
+  edge.alpha=0.25,
+  vertex.color=adjustcolor(mod, alpha.f=0.75),
+  vertex.label=as.character(submatrix$GeneSymbol),
+  vertex.label.cex=2.2,
+  vertex.label.dist=1.1,
+  vertex.label.degree=-pi/4,
+  vertex.label.color="black",
+  #vertex.frame.color='black',
+  layout= jitter(layoutCircle),
+  vertex.size=6,
+  main=paste(mod,"module")
+)
+}
+dev.off();
+
+
+
+pdf(paste0(fig_dir, 'networks/', cur_celltype, '_ModuleNetworks_100.pdf'),height=9,width=10);
+
+for (mod in uniquemodcolors)  {
+ #mod="turquoise"
+  numgenesingraph = 100;
+  numconnections2keep = 1000;
+  cat('module:',mod,'\n');
+  geneInfo=geneInfo[geneInfo$GeneSymbol!="NA",]
+  colind = which(colnames(geneInfo)==paste('kME',mod,sep=''));
+  rowind = which(geneInfo$Initially.Assigned.Module.Color==mod);
+  cat(' ',length(rowind),'probes in module\n');
+  submatrix = geneInfo[rowind,];
+  orderind = order(submatrix[,colind],decreasing=TRUE);
+  if (length(rowind) < numgenesingraph) {
+    numgenesingraph = length(rowind);
+    numconnections2keep = numgenesingraph * (numgenesingraph - 1);
+  }
+  cat('Making network graphs, using top',numgenesingraph,'probes and',numconnections2keep,'connections of TOM\n');
+  submatrix = submatrix[orderind[1:numgenesingraph],];
+  #Identify the columns in the TOM that correspond to these hub probes
+  matchind = match(submatrix$GeneSymbol,colnames(datExpr));
+  reducedTOM = TOM.matrix[matchind,matchind];
+
+  orderind = order(reducedTOM,decreasing=TRUE);
+  connections2keep = orderind[1:numconnections2keep];
+  reducedTOM = matrix(0,nrow(reducedTOM),ncol(reducedTOM));
+  reducedTOM[connections2keep] = 1;
+
+  g0 <- graph.adjacency(as.matrix(reducedTOM[1:10,1:10]),mode="undirected",weighted=TRUE,diag=FALSE)
+    layoutMata <- layout.circle(g0)
+
+  g0 <- graph.adjacency(as.matrix(reducedTOM[11:50,11:50]),mode="undirected",weighted=TRUE,diag=FALSE)
+  layoutMatb <- layout.circle(g0)
+
+   g0 <- graph.adjacency(as.matrix(reducedTOM[51:ncol(reducedTOM),51:ncol(reducedTOM)]),mode="undirected",weighted=TRUE,diag=FALSE)
+   layoutMatc <- layout.circle(g0)
+    g1 <- graph.adjacency(as.matrix(reducedTOM),mode="undirected",weighted=TRUE,diag=FALSE)
+    layoutMat <- rbind(layoutMata*0.25,layoutMatb*0.8, layoutMatc)
+
+    plot(g1,edge.color="grey",vertex.color=mod,vertex.label=as.character(submatrix$GeneSymbol),vertex.label.cex=0.7,vertex.label.dist=0.85,vertex.label.degree=-pi/4,vertex.label.color="black",layout= layoutMat,vertex.size=submatrix[,colind]^2*8,main=paste(mod,"module"))
+
+}
+dev.off();
+
+```
+
+Module score analysis in full snRNA dataset:
+
+```{r eval=FALSE}
+
+dir.create(paste0('figures/', cur_celltype, '/featureplots'))
+
+
+# load scWGCNA modules #########################################################
+cur_celltype <- 'ASC'
+cur_celltype <- 'END'
+cur_celltype <- 'EX'
+cur_celltype <- 'INH'
+cur_celltype <- 'ODC'
+
+
+fig_dir <- paste0('figures/', cur_celltype, '/')
+
+print(cur_celltype)
+geneInfo <- read.csv(paste0(data_dir, cur_celltype, '_geneInfoSigned.csv'), stringsAsFactors=FALSE)
+
+# remove grey module:
+geneInfo <- subset(geneInfo, Initially.Assigned.Module.Color != 'grey')
+
+# get top 25 genes by kME for each module:
+n_genes <- 25
+module_labels <- unique(geneInfo$ModuleLabel)
+modules <- unique(geneInfo$Initially.Assigned.Module.Color)
+module_labels <- module_labels[order(modules)]
+modules <- modules[order(modules)]
+module_list <- lapply(modules, function(mod){
+  cur <- subset(geneInfo, Initially.Assigned.Module.Color == mod)
+  cur[,c('GeneSymbol', paste0('kME', mod))] %>%
+    top_n(n_genes) %>% .$GeneSymbol
+})
+names(module_list) <-module_labels
+
+# compute module scores:
+seurat_obj <- AddModuleScore(
+ seurat_obj,
+ features=module_list,
+ name=paste0(cur_celltype, '_M')
+)
+
+# feature plots of module scores:
+plot_modules <- paste0(paste0(cur_celltype, '_M'), 1:length(modules))
+for(feature in plot_modules){
+  # plot scWGCNA module scores
+  order_values <- TRUE
+  p <- FeaturePlot(seurat_obj, features=feature, order=order_values, reduction='paga_umap') +
+  scale_color_gradient2(low=scales::muted('blue'), mid='gray95', high=scales::muted('red'),
+         guide = guide_colorbar(barwidth=15, barheight=0.5, ticks=FALSE)
+       ) + theme(plot.margin = unit(c(0, 0, 0, 0), "in"), legend.position='bottom') + umap_theme + ggtitle('') + NoLegend()
+
+  png(paste0(fig_dir, 'featureplots/', feature,'_featureplot.png'), width=4, height=4, res=300, units='in')
+  print(p)
+  dev.off()
+}
+
+
+```
+
+Plot heatmap of module scores for each cluster:
+
+```{r eval=FALSE}
+library(reshape2)
+library(ComplexHeatmap)
+
+# all clusters:
+module_df <- seurat_obj@meta.data; group <- 'all_clusters'; w = 12; h=4;
+
+features <- names(module_df)[grepl(cur_celltype, names(module_df))]
+feat2mod <- features; names(feat2mod) <- module_labels
+module_df <- module_df[,c('clusternum_anno', features)]
+
+
+# compute average module score for each cluster:
+tmp <- lapply(levels(module_df$clusternum_anno), function(i){
+  cur_df <- module_df %>% subset(clusternum_anno == i)
+  data.frame(
+    value=as.numeric(colSums(cur_df[,features]) / nrow(cur_df)),
+    cluster = i,
+    feature = features
+  )
+})
+plot_df <- Reduce(rbind, tmp)
+plot_df$feature <- names(feat2mod[plot_df$feature])
+
+# remove gray module:
+mod_colors <- modules
+names(mod_colors) <- module_labels
+
+# reshape to wide format
+plot_df <- reshape2::dcast(plot_df, feature ~ cluster)
+rownames(plot_df) <- plot_df$feature
+plot_df <- plot_df %>% dplyr::select(-c(feature))
+
+zScore <- function(x){(x - mean(x)) /sd(x)}
+matrix_z <- apply(plot_df, 1, zScore) %>% t()
+matrix_z <- matrix_z[,order(colnames(matrix_z))]
+
+# keep full values to plot onto the heatmap
+matrix_full <- matrix_z
+matrix_anno <- ifelse(abs(matrix_full) >= 2, signif(matrix_full,2), '')
+
+# change the range
+range(matrix_z)
+matrix_z <- ifelse(matrix_z >= 2, 2, matrix_z)
+matrix_z <- ifelse(matrix_z <= -2, -2, matrix_z)
+
+# rename modules
+rownames(matrix_z) <- module_labels
+rownames(matrix_anno) <- module_labels
+matrix_anno <- matrix_anno[rownames(matrix_z)[order(rownames(matrix_z))],]
+matrix_z <- matrix_z[rownames(matrix_z)[order(rownames(matrix_z))],]
+
+# re-order columns:
+matrix_z <- matrix_z[,levels(seurat_obj$clusternum_anno)]
+matrix_anno <- matrix_anno[,levels(seurat_obj$clusternum_anno)]
+
+# names(mod_colors) <- rownames(matrix_z)
+row_ha <- rowAnnotation(
+  module = rownames(matrix_z),
+  col = list(
+    module = mod_colors
+  )
+)
+
+bottom_anno <- HeatmapAnnotation(
+  text = anno_text(colnames(matrix_z), rot=45)
+)
+
+
+pdf(paste0(fig_dir, cur_celltype, '_module_heatmap_', group,'.pdf'), width=w, height=h)
+ComplexHeatmap::Heatmap(
+  matrix_z,
+  cluster_rows=FALSE,
+  cluster_columns=FALSE,
+  left_annotation = row_ha,
+  bottom_annotation = bottom_anno,
+  use_raster = TRUE,
+  cell_fun = function(j,i,x,y,w,h,col){
+    grid.text(matrix_anno[i,j], x, y, gp=gpar(fontsize=10))
+  },
+  show_column_names=FALSE
+)
+dev.off()
+
+
+```

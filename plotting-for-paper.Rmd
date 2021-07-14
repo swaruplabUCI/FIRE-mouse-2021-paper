@@ -1,0 +1,652 @@
+
+
+```{r eval=FALSE}
+
+# conda activate r-env
+
+library(Seurat)
+library(tidyverse)
+library(cowplot)
+library(viridis)
+library(ggpubr)
+library(RColorBrewer)
+library(ggrepel)
+library(patchwork)
+library(ggrastr)
+
+theme_set(theme_cowplot())
+prediction.colfunc <- colorRampPalette(rev(brewer.pal(9, 'Purples' )[2:9]))
+colfunc <- colorRampPalette(rev(brewer.pal(9, 'Greens' )[2:9]))
+
+
+setwd("/Volumes/GoogleDrive/Shared drives/Bioinfo_SwarupLab/Sam_Dropbox/pipelines/FIRE-mouse-2021/analysis")
+data_dir <- "data/"
+fig_dir <- 'figures/'
+
+umap_theme <- theme(
+  axis.line=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+  axis.title.x=element_blank(),
+  axis.title.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border=element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank()
+)
+
+
+```
+
+barplot showing the number of cells in each cluster:
+
+
+```{r eval=FALSE}
+
+df <- as.data.frame(table((seurat_obj$clusternum_anno)))
+df$Var1 <- fct_rev(df$Var1)
+
+p1 <- ggplot(df, aes(x=Var1, y=Freq, fill=Var1)) +
+  geom_bar(stat='identity') + NoLegend() + RotatedAxis() + ylab(expression(italic(N)[cells])) + xlab('') +
+  geom_text(aes(label=scales::comma(Freq, accuracy=1)),  color="black", size=3.5, hjust='inward') +
+  scale_y_continuous(labels=scales::comma) +
+  coord_flip() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.grid.minor=element_blank(),
+    panel.grid.major.x=element_line(colour="lightgray", size=0.5),
+    axis.ticks.x=element_blank(),
+  )
+
+pdf('barplot_nCells.pdf', width=4, height=8)
+p1
+dev.off()
+
+
+df <- as.data.frame(table((seurat_obj$clusternum_anno)))
+df$Var1 <- fct_rev(df$Var1)
+
+p1 <- ggplot(df, aes(x=Var1, y=Freq, fill=Var1)) +
+  geom_bar(stat='identity') + NoLegend() + RotatedAxis() + ylab(expression(italic(N)[cells])) + xlab('') +
+  geom_text(aes(label=scales::comma(Freq, accuracy=1)),  color="black", size=3.5, hjust='inward') +
+  scale_y_continuous(labels=scales::comma) +
+  scale_fill_manual(values=cluster_colors_all) +
+  coord_flip() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.grid.minor=element_blank(),
+    panel.grid.major.x=element_line(colour="lightgray", size=0.5),
+    axis.ticks.x=element_blank(),
+  )
+
+
+pdf(paste0(fig_dir, 'barplot_nCells_clusters.pdf'), width=4, height=8)
+p1
+dev.off()
+
+```
+
+Dotplot of cluster DEGs:
+
+```{r eval=FALSE}
+
+markers <- c(
+  'Rarb',
+  'Trpc6',
+  'Shisa6',
+  'Igfn1',
+  'Ndst4',
+  'Cux2',
+  'Hs3st2',
+  'Rorb',
+  'Tshz2',
+  'Tmem200a',
+  'Grik3',
+  'Kcnip1',
+  'Kcnmb2',
+  'Synpo2',
+  'Tmem163',
+  'Cpa6',
+  'Pcbp3',
+  'Gpc5',
+  'Slc6a11',
+  'Plpp3',
+  'Gm29521',
+  'Vcan',
+  'Ddn',
+  'Inpp5d',
+  'Spag16',
+  'Plp1',
+  'Enpp6',
+  'Flt1',
+  'Notch3',
+  'Ptgds'
+)
+
+
+# dot plot color scheme:
+dotplot_colors <- c(rep('#FFFFFF', 50), rev(prediction.colfunc(150)))
+
+p <- DotPlot(seurat_obj, features = rev(markers), group.by='clusternum_anno', dot.min=0.15) +
+  coord_flip() + RotatedAxis() +
+  scale_color_gradientn(colors=dotplot_colors) +
+  ylab('') + xlab('') + ggtitle('Cluster marker DEGs') + theme(plot.title = element_text(hjust = 0.5))
+
+pdf(paste0(fig_dir, 'dotplot_cluster_markers.pdf'), width=12, height=8, useDingbats=FALSE)
+p
+dev.off()
+
+
+```
+
+Plot rosenberg label transfer ordered
+
+```{r eval=FALSE}
+
+DefaultAssay(seurat_obj) <- 'predictions'
+
+prediction.features <- c(
+
+  '4 Medium Spiny Neurons',
+  '40 HIPP Granule/PyrCA3',
+  '35 HIPP Pyr Crym',
+  '38 HIPP Pyr Grik4',
+  '41 HIPP Pyr Npy2r',
+  '11 CTX PyrL4/L5',
+  '5 CTX PyrL2/L3 Pappa2',
+  '7 CTX PyrL2/L3 Met',
+  '14 CTX PyrL6a',
+  '18 CLAU Pyr',
+  '10 CTX PyrL4 Rorb',
+  '12 CTX PyrL5 Itgb3',
+  '6 CTX PyrL2/L3/L4 Ntf3',
+  '15 CTX PyrL5/L6 Sulf1',
+  '16 CTX PyrL5/L6 Npr3',
+  '17 CTX PyrL6',
+  '34 SUB Pyr',
+  '13 CTX PyrL5 Fezf2',
+  '19 MTt Glut',
+  '32 Nigral Dopaminergic',
+  '44 Migrating Int Lhx6',
+  '50 Migrating Int Adarb2',
+  '20 THAL Glut',
+  '2 OB Mitral/Tufted Ms4a15',
+  '28 CB Granule',
+  '46 Migrating Int Cpa6',
+  '49 Migrating Int Lgr6',
+  '69 Astro Prdm16',
+  '71 Bergmann Glia',
+  '68 Astro Slc7a10',
+  '73 OEC',
+  '61 OPC',
+  '59 Oligo COP1',
+  '60 Oligo COP2',
+  '51 SVZ Stem',
+  '52 Cajal-Retzius',
+  '63 Microglia',
+  '62 Macrophage',
+  '72 Ependyma',
+  '57 Oligo MOL',
+  '56 Oligo MFOL1',
+  '55 Oligo MFOL2',
+  '64 Endothelia',
+  '65 SMC',
+  '66 VLMC Slc6a13'
+)
+
+
+p <- DotPlot(
+  seurat_obj, group.by='clusternum_anno', dot.min=0.25,
+  features=rev(prediction.features)
+) + coord_flip() + RotatedAxis() + scale_color_gradientn(colors=rev(colfunc(256))) + ylab('') + xlab('') + ggtitle('Seurat Label Transfer with Rosenberg et al. 2018 SPLiT-seq data') + theme(plot.title = element_text(hjust = 0.5))
+pdf(paste0(fig_dir, 'dotplot_LT_predictions.pdf'), width=12, height=10, useDingbats=FALSE)
+p
+dev.off()
+
+
+```
+
+Csf1r depletion in FIRE conditions:
+
+```{r eval=FALSE}
+
+# color scheme from Sep:
+sample_color.scheme <- c(
+  rgb(139,171,211, maxColorValue=255),
+  rgb(9,153,99, maxColorValue=255),
+  rgb(176,127,192, maxColorValue=255),
+  rgb(7,126,151, maxColorValue=255),
+  rgb(87,87,249, maxColorValue=255),
+  rgb(184,86,215, maxColorValue=255)
+)
+names(sample_color.scheme) <- levels(seurat_obj$DX)
+
+
+comparisons <- list(c(1,2),  c(1,3), c(2,4))
+
+# csf1r
+genes <- c('Csf1r', 'Cx3cr1', 'P2ry12', 'Trem2', 'Tmem119',  'Cd9')
+
+for(gene in genes){
+  print(gene)
+  p1 <- VlnPlot(subset(seurat_obj, class=='IMM'), features=gene, group.by='DX', pt.size=0) + scale_fill_manual(values=sample_color.scheme) +
+  stat_compare_means(method='wilcox', comparisons=comparisons, label='p.signif') +
+  xlab('') + NoLegend() + ylim(c(-0.1,4.75))
+  pdf(paste0(fig_dir, 'vlnplot_', gene, '_DX.pdf'), width=4, height=4)
+  print(p1)
+  dev.off()
+
+}
+
+```
+
+
+DAM scores
+
+```{r eval=FALSE}
+
+homeostatic <- str_to_title(c('HEXB', 'CST3', 'CX3CR1', 'CTSD', 'CSF1R', 'CTSS', 'SPARC', 'TMSB4X', 'P2RY12', 'C1QA', 'C1QB'))
+stage1_DAM <- str_to_title(c('TYROBP', 'CTSB', 'APOE', 'B2M', 'FTH1'))
+stage2_DAM <- str_to_title(c('TREM2', 'AXL', 'CST7', 'CTSL', 'LPL', 'CD9', 'CSF1', 'ITGAX', 'CLEC7A', 'LILRB4', 'TIMP2'))
+
+seurat_imm <- subset(seurat_obj, class == 'IMM')
+
+seurat_imm <- AddModuleScore(
+  seurat_imm,
+  features=list('stage1_DAM'=stage1_DAM, 'stage2_DAM'=stage2_DAM, 'homeostatic'=homeostatic),
+  name=c('stage1_DAM', 'stage2_DAM', 'homeostatic')
+)
+
+
+comparisons <- list(c(5,6), c(2,4), c(1,3), c(1,2), c(1,6))
+
+p1 <- VlnPlot(seurat_imm, features='homeostatic3', group.by='DX', pt.size=0) + scale_fill_manual(values=sample_color.scheme) +
+geom_hline(yintercept = 0, linetype='dashed') +
+stat_summary(fun.data='mean_cl_boot', color='black') +
+stat_compare_means(method='wilcox', comparisons=comparisons, label='p.signif') +
+xlab('') + NoLegend() +
+ylim(c(-0.5,2.5))+ ggtitle('Homeostatic')
+
+p2 <- VlnPlot(seurat_imm, features='stage1_DAM1', group.by='DX', pt.size=0) + scale_fill_manual(values=sample_color.scheme) +
+geom_hline(yintercept = 0, linetype='dashed') +
+stat_summary(fun.data='mean_cl_boot', color='black') +
+stat_compare_means(method='wilcox', comparisons=comparisons, label='p.signif') +
+xlab('') + NoLegend() +
+ylim(c(-0.5,2.5))+ ggtitle('Stage 1 DAM')
+
+p3 <- VlnPlot(seurat_imm, features='stage2_DAM2', group.by='DX', pt.size=0) + scale_fill_manual(values=sample_color.scheme) +
+geom_hline(yintercept = 0, linetype='dashed') +
+stat_summary(fun.data='mean_cl_boot', color='black') +
+stat_compare_means(method='wilcox', comparisons=comparisons, label='p.signif') +
+xlab('') + NoLegend() +
+ylim(c(-0.5,2.5)) + ggtitle('Stage 2 DAM')
+
+pdf(paste0(fig_dir, 'vlnplot_DAM_DX.pdf'), width=8, height=4, useDingbats=FALSE)
+p1 | p2 | p3
+dev.off()
+
+
+```
+
+categorical variables:
+
+Plot barplot for each cluster showing proportion of genotype, Sex, etc:
+
+```{r eval=FALSE}
+
+################################################################################
+# Proportion of Sample in each cluster
+################################################################################
+
+seurat_meta <- seurat_obj@meta.data
+seurat_meta$SampleID <- droplevels(seurat_meta$SampleID)
+
+samples <- seurat_obj$SampleID %>% unique %>% as.character
+
+clusters <- seurat_obj$clusternum_anno %>% levels %>% as.character
+
+
+proportion_df <- data.frame()
+for(i in 1:length(clusters)){
+  cluster_meta <- subset(seurat_meta, clusternum_anno == clusters[i])
+  cur_df <- as.data.frame(table(cluster_meta$SampleID)/dim(cluster_meta)[1])
+  print(sum(cur_df$Freq))
+  cur_df$cluster <- clusters[i]
+  proportion_df <- rbind(proportion_df, cur_df)
+}
+
+proportion_df <- dplyr::rename(proportion_df, SampleID = Var1)
+proportion_df <- dplyr::rename(proportion_df, fraction = Freq)
+proportion_df$cluster <- factor(proportion_df$cluster, levels=levels(seurat_obj$clusternum_anno))
+
+pdf("figures/sample_clusters_barplot.pdf", height=4, width=10)
+p <- ggplot(proportion_df, aes(y=fraction, x=cluster, fill=SampleID)) +
+  geom_bar(stat='identity') +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_fill_manual(values=color.scheme) +
+  #theme_minimal() +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank()
+  ) + NoLegend()
+print(p)
+dev.off()
+
+################################################################################
+# Proportion of Sex in each cluster
+################################################################################
+seurat_meta <- seurat_obj@meta.data
+seurat_meta$SampleID <- droplevels(seurat_meta$SampleID)
+
+clusters <- seurat_obj$clusternum_anno %>% unique %>% as.character
+
+proportion_df <- data.frame()
+for(i in 1:length(clusters)){
+  cluster_meta <- subset(seurat_meta, clusternum_anno == clusters[i])
+  cur_df <- as.data.frame(table(cluster_meta$Sex)/dim(cluster_meta)[1])
+  print(sum(cur_df$Freq))
+  cur_df$cluster <- clusters[i]
+  proportion_df <- rbind(proportion_df, cur_df)
+}
+
+proportion_df <- dplyr::rename(proportion_df, Sex = Var1)
+proportion_df <- dplyr::rename(proportion_df, fraction = Freq)
+proportion_df$cluster <- factor(proportion_df$cluster, levels=levels(seurat_obj$clusternum_anno))
+
+
+pdf("figures/sex_clusters_barplot.pdf", height=4, width=10)
+p <- ggplot(proportion_df, aes(y=fraction, x=cluster, fill=Sex)) +
+  geom_bar(stat='identity') +
+  scale_y_continuous(expand = c(0,0)) +
+  scale_fill_manual(values=c("goldenrod1", "dodgerblue")) +
+  #theme_minimal() +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    axis.text.x = element_text(angle=45, hjust=1),
+    axis.title.x = element_blank(),
+    legend.title = element_blank(),
+    axis.line.y = element_blank(),
+    axis.line.x = element_blank()
+  )
+print(p)
+dev.off()
+
+
+```
+
+
+```{r eval=FALSE}
+
+################################################################################
+# number of cells in each sample
+#################################################################################
+
+seurat_obj$SampleID <- droplevels(seurat_obj$SampleID)
+
+
+df <- as.data.frame(table(seurat_obj$SampleID))
+df$group <- factor(
+  as.character(seurat_obj@meta.data$DX)[match(as.character(df$Var1), seurat_obj@meta.data$SampleID)],
+  levels = levels(seurat_obj$DX)
+)
+
+p <- ggplot(df, aes(x=reorder(Var1, Freq), y=Freq, fill=Var1, )) +
+  geom_bar(stat='identity') +
+  geom_text(aes(label=scales::comma(Freq, accuracy=1)),  color="black", size=3.5, hjust='inward') +
+  scale_y_continuous(labels=scales::comma) +
+  scale_fill_manual(values=color.scheme) +
+  coord_flip() + NoLegend() + RotatedAxis() + xlab('') +  ylab(expression(italic(N)[cells])) +
+  ggtitle('Number of cells per sample in each condition') + theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.grid.minor=element_blank(),
+    panel.grid.major.x=element_line(colour="lightgray", size=0.5),
+    axis.ticks.y=element_blank(),
+  )
+
+pdf(paste0(fig_dir, 'barplot_nCells_samples.pdf'), width=6, height=6)
+p + facet_wrap(~group, scales='free_y', ncol=2)
+dev.off()
+
+
+```
+
+UMAP colored by sample and sex:
+
+```{r eval=FALSE}
+
+
+################################################################################
+# UMAP colored by sample:
+#################################################################################
+
+p1 <- seurat_obj@meta.data %>% ggplot(aes(x=UMAP_1, y=UMAP_2, color=SampleID)) +
+  rasterise(geom_point(size=0.5), dpi=800) +
+  scale_color_manual(values=color.scheme) +  umap_theme + guides(color = guide_legend(override.aes = list(size=3)))
+
+
+pdf(paste0(fig_dir, 'umap_samples.pdf'), width=7, height=6, useDingbats=FALSE)
+p1 + facet_wrap('DX', ncol=2) + theme(strip.background=element_blank())
+dev.off()
+
+################################################################################
+# UMAP colored by Sex
+#################################################################################
+
+p1 <- seurat_obj@meta.data %>% ggplot(aes(x=UMAP_1, y=UMAP_2, color=Sex)) +
+  rasterise(geom_point(size=0.5), dpi=800) +
+  scale_color_manual(values=c('goldenrod1', 'dodgerblue')) +  umap_theme + guides(color = guide_legend(override.aes = list(size=3)))
+
+
+pdf(paste0(fig_dir, 'umap_sex.pdf'), width=7, height=6, useDingbats=FALSE)
+p1
+dev.off()
+
+```
+
+Violin plot of UMI for each sample and each cluster:
+
+```{r eval=FALSE}
+
+p1 <- VlnPlot(seurat_obj, features='nCount_RNA', group.by='SampleID', pt.size=0) + scale_fill_manual(values=color.scheme) +
+geom_boxplot(outlier.shape=NA, width=.25, fill='white') +
+scale_y_continuous(labels=scales::comma) +
+ylab(expression(italic(N)[UMI])) +
+xlab('') + NoLegend() + ggtitle('')
+
+pdf('figures/vlnplot_nUMI_samples.pdf', width=8, height=3)
+p1
+dev.off()
+
+
+
+p1 <- VlnPlot(seurat_obj, features='nCount_RNA', group.by='clusternum_anno', pt.size=0) + scale_fill_manual(values=cluster_colors_all) +
+geom_boxplot(outlier.shape=NA, width=.25, fill='white') +
+scale_y_continuous(labels=scales::comma) +
+ylab(expression(italic(N)[UMI])) +
+xlab('') + NoLegend() + ggtitle('')
+
+pdf('figures/vlnplot_nUMI_clusters.pdf', width=9, height=4)
+p1
+dev.off()
+
+
+```
+
+boxplot showing proportions
+
+```{r eval=FALSE}
+
+
+#################################################################################
+# Proportion of clusters
+#################################################################################
+
+seurat_obj$class <- droplevels(seurat_obj$class)
+
+seurat_meta <- seurat_obj@meta.data %>% subset(class %in% c('INH', 'EX', 'OB')); name='neuronal'; w=6;h=10; group='clusternum_anno';
+seurat_meta <- seurat_obj@meta.data %>% subset(!class %in% c('INH', 'EX', 'OB'));  name='non-neuronal'; w=6;h=10; group='clusternum_anno';
+
+
+seurat_meta <- seurat_obj@meta.data %>% subset(!class %in% c('INH', 'EX', 'OB')); name='celltypes_non-neuronal'; w=6;h=10; group='class'
+seurat_meta <- seurat_obj@meta.data %>% subset(class %in% c('INH', 'EX', 'OB')); name='celltypes_neuronal'; w=6;h=10; group='cluster_name'
+
+
+
+seurat_meta$class <- seurat_meta$class %>% droplevels
+seurat_meta$DX <- droplevels(seurat_meta$DX)
+seurat_meta$SampleID <- droplevels(seurat_meta$SampleID)
+seurat_meta$cluster_name <- seurat_meta$cluster_name %>% droplevels
+
+
+
+meta_list <- seurat_meta%>%
+  dplyr::group_split(SampleID)
+
+temp <- lapply(meta_list, function(meta){
+  df <- as.data.frame(meta[,group] %>% table / nrow(meta))
+  colnames(df) <- c('cluster', 'proportion')
+  df$SampleID <- unique(meta$SampleID)
+  df$DX <- unique(meta$DX)
+  df
+})
+
+proportion_df <- Reduce(rbind, temp)
+
+# order clusters based on number of nucleu
+proportion_df$cluster_num <- as.numeric(proportion_df$cluster)
+
+
+
+pdf(paste0(fig_dir, name,'_composition_boxplot.pdf'), width=4, height=3)
+plot_list <- list()
+for(cl in unique(proportion_df$cluster)){
+  cur_df <- subset(proportion_df, cluster==cl)
+  #m_df <- cur_df %>% group_by(DX) %>% summarize(median = mean(proportion))
+
+
+  p <- ggplot(cur_df, aes(y=proportion, x=reorder(DX, DX), fill=DX)) +
+    scale_x_discrete(limits=rev(levels(cur_df$DX))) +
+    geom_boxplot(outlier.shape=NA, color='black', alpha=0.7) +
+    geom_jitter(aes(color=SampleID), size=1.5, width=0.25) +
+    scale_fill_manual(values=sample_color.scheme) +
+    scale_color_manual(values=color.scheme) +
+    ggtitle(cl) +
+    coord_flip() +
+    labs(fill='') + NoLegend() +
+    theme(
+      plot.title = element_text(hjust = 0.5),
+      panel.grid.major.x=element_line(colour="lightgray", size=0.5),
+      axis.line.y = element_blank(),
+      axis.ticks.y = element_blank()
+    ) + xlab('') + ylab(paste('proportion', name))
+
+  print(p)
+  plot_list[[cl]] <- p
+}
+dev.off()
+
+
+
+p <- ggplot(proportion_df, aes(y=proportion, x=reorder(cluster,-cluster_num), fill=DX)) +
+  # scale_x_discrete(limits=rev(levels(cur_df$DX))) +
+  geom_boxplot(outlier.shape=NA, color='black', alpha=0.7) +
+  #geom_jitter(aes(color=SampleID), size=1.5, width=0.25) +
+  scale_fill_manual(values=sample_color.scheme) +
+  scale_color_manual(values=color.scheme) +
+  coord_flip() +
+  labs(fill='') + NoLegend() +
+  theme(
+    plot.title = element_text(hjust = 0.5),
+    panel.grid.major.x=element_line(colour="lightgray", size=0.5),
+    axis.line.y = element_blank(),
+    axis.ticks.y = element_blank()
+  ) + xlab('') + ylab(paste('proportion', name))
+
+
+
+pdf(paste0(fig_dir, name,'_composition_boxplot_combined.pdf'), width=3, height=8)
+p
+dev.off()
+
+#################################################################################
+# bootstrapped cluster proportion analysis
+#################################################################################
+
+
+meta_list <- seurat_obj@meta.data %>%
+  dplyr::group_split(SampleID)
+
+
+
+
+sample_percent=0.30
+n_iterations = 20
+
+proportion_df <- data.frame()
+for(i in 1:n_iterations){
+  cur_sample <- seurat_meta[sample(rownames(seurat_meta), round(sample_percent*nrow(seurat_meta))),]
+
+  meta_list <- cur_sample %>%
+    dplyr::group_split(SampleID)
+
+  temp <- lapply(meta_list, function(meta){
+    #print(table(meta$Diagnosis))
+    df <- as.data.frame(meta[,group] %>% table / nrow(meta))
+    colnames(df) <- c('cluster', 'proportion')
+    df$SampleID <- unique(meta$SampleID)
+    df$DX <- unique(meta$DX)
+    df
+  })
+
+  cur_df <- Reduce(rbind, temp)
+  cur_df$iteration <- i
+  proportion_df <- rbind(proportion_df, cur_df)
+}
+
+clusters <- unique(seurat_meta[,group])
+clusters <- clusters[order(clusters)] %>% as.character()
+
+
+# iteratively make comparisons:
+comparisons <- list(
+  '5xFIRE vs 5xFAD' = c('5xFIRE', '5xFAD'),
+  'WT vs FIRE' = c('WT', 'FIRE'),
+  'FIRE vs 5xFIRE' = c('FIRE', '5xFIRE')
+)
+
+result_table <- data.frame()
+for(i in 1:length(comparisons)){
+
+  cur_comparison <- comparisons[[i]]
+  pvals <- sapply(clusters, function(cur_cluster){
+    result <- wilcox.test(
+      proportion_df %>% subset(DX==cur_comparison[1] & cluster==cur_cluster) %>% .$proportion,
+      proportion_df %>% subset(DX==cur_comparison[2] & cluster==cur_cluster) %>% .$proportion
+    )
+    result$p.value
+  })
+  cur_result_table <- data.frame(
+    pval = as.numeric(pvals),
+    cluster = names(pvals),
+    comparison = names(comparisons)[i]
+  )
+  result_table <- rbind(result_table, cur_result_table)
+}
+
+# compute fdr:
+result_table$FDR <- p.adjust(result_table$pval, method='fdr')
+result_table$signif <- as.character(gtools::stars.pval(result_table$FDR))
+write.csv(result_table, file=paste0('data/', name, '_comparison_results.csv'), quote=FALSE)
+
+result_table
+
+
+```

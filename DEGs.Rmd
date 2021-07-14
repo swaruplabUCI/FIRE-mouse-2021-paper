@@ -1,0 +1,787 @@
+
+# Load data
+
+```{r eval=FALSE}
+
+library(Seurat)
+library(tidyverse)
+library(cowplot)
+library(Matrix)
+library(viridis)
+library(presto)
+library(harmony)
+library(RColorBrewer)
+library(patchwork)
+library(ggpubr)
+library(ggrepel)
+colfunc <- colorRampPalette(rev(brewer.pal(11, 'Spectral' )))
+theme_set(theme_cowplot())
+
+setwd("/dfs3b/swaruplab/smorabit/analysis/FIRE_mouse_2021/")
+
+# directories
+data_dir <- "data/"
+fig_dir <- 'figures/'
+
+umap_theme <- theme(
+  axis.line=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+  axis.title.x=element_blank(),
+  axis.title.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border=element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank()
+)
+
+# re-load data
+seurat_obj <- readRDS('/dfs3b/swaruplab/smorabit/analysis/FIRE_mouse_2021/data/FIRE_mouse_seurat.rds')
+seurat_obj$cellchat_clusters <- ifelse(seurat_obj$cellchat_clusters == 'INH midbrain', 'EX midbrain', seurat_obj$cellchat_clusters)
+
+# color scheme for samples:
+color.scheme <- c(
+  brewer.pal(9, 'Reds')[2:9],
+  brewer.pal(9, 'Purples')[2:9],
+  brewer.pal(9, 'Oranges')[2:9],
+  brewer.pal(9, 'Greys')[2:9],
+  brewer.pal(9, 'Blues')[2:9],
+  brewer.pal(9, 'Greens')[2:9]
+)
+names(color.scheme) <- as.character(levels(seurat_obj$SampleID))
+
+sample_color.scheme <- c(
+  brewer.pal(9, 'Greys')[5],
+  brewer.pal(9, 'Purples')[7],
+  brewer.pal(9, 'Oranges')[6],
+  brewer.pal(9, 'Reds')[6],
+  brewer.pal(9, 'Blues')[5],
+  brewer.pal(9, 'Greens')[5]
+)
+names(sample_color.scheme) <- levels(seurat_obj$DX)
+
+# color scheme from Sep:
+sample_color.scheme <- c(
+  rgb(139,171,211, maxColorValue=255),
+  rgb(9,153,99, maxColorValue=255),
+  rgb(176,127,192, maxColorValue=255),
+  rgb(7,126,151, maxColorValue=255),
+  rgb(87,87,249, maxColorValue=255),
+  rgb(184,86,215, maxColorValue=255)
+)
+names(sample_color.scheme) <- levels(seurat_obj$DX)
+
+
+library(future)
+plan('multiprocess', workers=8)
+
+setwd('differential_analysis/')
+
+```
+
+
+Cluster marker DEGs:
+
+```{r eval=FALSE}
+
+# compute marker DEGs for each cluster
+Idents(seurat_obj) <- seurat_obj$clusternum_anno
+markers <- FindAllMarkers(
+  seurat_obj,
+  only.pos=TRUE,
+  min.pct=0.2,
+  logfc.threshold=0.5,
+  test.use='wilcox'
+)
+
+markers$FDR <- p.adjust(markers$p_val, 'fdr')
+
+save(markers, file=paste0(data_dir, 'cluster_marker_DEGs.rda'))
+load(file=paste0(data_dir, 'cluster_marker_DEGs.rda'))
+
+
+################################################################################
+# Hierarchical Clustering of the top 25 DEGs per cluster:
+################################################################################
+library(circlize)
+library(ComplexHeatmap)
+library(dendsort)
+
+top_degs <- markers %>%
+  group_by(cluster) %>%
+  top_n(25, wt=avg_logFC)
+length(unique(top_degs$gene))
+
+Idents(seurat_obj) <- seurat_obj$clusternum_anno
+expression_matrix <- AverageExpression(seurat_obj, features=unique(top_degs$gene))
+expression_matrix <- expression_matrix$RNA
+
+# convert to Z score
+zScore <- function(x){(x - mean(x)) /sd(x)}
+matrix_z <- apply(expression_matrix, 1, zScore) %>% t()
+matrix_z <- matrix_z[,order(colnames(matrix_z))]
+
+# col_fun = colorRamp2(c(range(matrix_z)[1], 0, range(matrix_z)[2]), c("blue", "white", "red"))
+
+cn = colnames(matrix_z)
+
+# set row annotation as selected genes:
+# set annotation list
+gene_anno_list <- top_degs %>% top_n(2, wt=avg_logFC) %>% .$gene %>% unique
+gene_anno_list <- gene_anno_list[gene_anno_list %in% rownames(matrix_z)]
+
+ha = rowAnnotation(foo = anno_mark(at = unlist(lapply(gene_anno_list, function(gene){which(rownames(matrix_z) == gene)})), labels = gene_anno_list))
+
+
+# hierarchical clustering:
+row_dend = dendsort(hclust(dist(matrix_z)))
+col_dend = dendsort(hclust(dist(t(matrix_z))))
+
+# plot heatmap
+pdf(paste0(fig_dir, 'DEG_heatmap.pdf'), width=11, height=15)
+ComplexHeatmap::Heatmap(
+  matrix_z, show_column_names = FALSE, show_row_names=FALSE,
+  # col = col_fun,
+  cluster_rows=row_dend,
+  bottom_annotation = HeatmapAnnotation(
+      text = anno_text(cn, rot = 45, location = unit(1, "npc"), just = "right"),
+      annotation_height = max_text_width(cn)
+  ),
+  right_annotation = ha,
+  use_raster = TRUE
+)
+dev.off()
+
+```
+
+
+5xFIRE vs FIRE DEGs
+
+```{r eval=FALSE}
+
+marker_df <- data.frame()
+for(cl in unique(seurat_obj$cellchat_clusters)){
+  print(cl)
+  seurat_degs <- subset(seurat_obj, cellchat_clusters == cl & DX %in% c('FIRE', '5xFIRE'))
+  Idents(seurat_degs) <- seurat_degs$DX
+  de_markers <- FindMarkers(
+    seurat_degs,
+    ident.1 = '5xFIRE',
+    ident.2 = 'FIRE',
+    only.pos=FALSE,
+    min.pct=0,
+    logfc.threshold=0,
+    test.use='wilcox'
+  )
+  de_markers$gene <- rownames(de_markers)
+  de_markers$cluster <- cl
+  de_markers$FDR <- p.adjust(de_markers$p_val, 'fdr')
+
+  marker_df <- rbind(marker_df, de_markers)
+
+}
+save(marker_df, file=paste0(data_dir, '5xFIRE_vs_FIRE_DEGs.rda'))
+load(file=paste0(data_dir, '5xFIRE_vs_FIRE_DEGs.rda'))
+
+# save markers as a csv:
+write.csv(marker_df, file=paste0(data_dir, '5xFIRE_vs_FIRE_major_celltypes.csv'), row.names=FALSE, quote=FALSE)
+marker_df <- read.csv(file=paste0(data_dir, '5xFIRE_vs_FIRE_major_celltypes.csv'), stringsAsFactors=FALSE)
+
+
+```
+
+
+
+5xFAD vs WT DEGs
+
+```{r eval=FALSE}
+
+marker_df <- data.frame()
+for(cl in unique(seurat_obj$cellchat_clusters)){
+  print(cl)
+  seurat_degs <- subset(seurat_obj, cellchat_clusters == cl & DX %in% c('5xFAD', 'WT'))
+  Idents(seurat_degs) <- seurat_degs$DX
+  de_markers <- FindMarkers(
+    seurat_degs,
+    ident.1 = '5xFAD',
+    ident.2 = 'WT',
+    only.pos=FALSE,
+    min.pct=0,
+    logfc.threshold=0,
+    test.use='wilcox'
+  )
+  de_markers$gene <- rownames(de_markers)
+  de_markers$cluster <- cl
+  de_markers$FDR <- p.adjust(de_markers$p_val, 'fdr')
+
+  marker_df <- rbind(marker_df, de_markers)
+
+}
+save(marker_df, file=paste0(data_dir, '5xFAD_vs_WT_DEGs.rda'))
+load(file=paste0(data_dir, '5xFAD_vs_WT_DEGs.rda'))
+
+# save markers as a csv:
+write.csv(marker_df, file=paste0(data_dir, '5xFAD_vs_WT_major_celltypes.csv'), row.names=FALSE, quote=FALSE)
+marker_df <- read.csv(file=paste0(data_dir, '5xFAD_vs_WT_major_celltypes.csv'), stringsAsFactors=FALSE)
+
+
+```
+
+5xFIRE vs WT DEGs
+
+```{r eval=FALSE}
+
+marker_df <- data.frame()
+for(cl in unique(seurat_obj$cellchat_clusters)){
+  print(cl)
+  seurat_degs <- subset(seurat_obj, cellchat_clusters == cl & DX %in% c('5xFIRE', 'WT'))
+  Idents(seurat_degs) <- seurat_degs$DX
+  de_markers <- FindMarkers(
+    seurat_degs,
+    ident.1 = '5xFIRE',
+    ident.2 = 'WT',
+    only.pos=FALSE,
+    min.pct=0,
+    logfc.threshold=0,
+    test.use='wilcox'
+  )
+  de_markers$gene <- rownames(de_markers)
+  de_markers$cluster <- cl
+  de_markers$FDR <- p.adjust(de_markers$p_val, 'fdr')
+
+  marker_df <- rbind(marker_df, de_markers)
+
+}
+save(marker_df, file=paste0(data_dir, '5xFIRE_vs_WT_DEGs.rda'))
+load(file=paste0(data_dir, '5xFIRE_vs_WT_DEGs.rda'))
+
+# save markers as a csv:
+write.csv(marker_df, file=paste0(data_dir, '5xFIRE_vs_WT_major_celltypes.csv'), row.names=FALSE, quote=FALSE)
+marker_df <- read.csv(file=paste0(data_dir, '5xFIRE_vs_WT_major_celltypes.csv'), stringsAsFactors=FALSE)
+
+
+```
+
+
+5xFIRE vs 5xFAD DEGs
+
+```{r eval=FALSE}
+
+marker_df <- data.frame()
+for(cl in unique(seurat_obj$cellchat_clusters)){
+  print(cl)
+  seurat_degs <- subset(seurat_obj, cellchat_clusters == cl & DX %in% c('5xFAD', '5xFIRE'))
+  Idents(seurat_degs) <- seurat_degs$DX
+  de_markers <- FindMarkers(
+    seurat_degs,
+    ident.1 = '5xFIRE',
+    ident.2 = '5xFAD',
+    only.pos=FALSE,
+    min.pct=0,
+    logfc.threshold=0,
+    test.use='wilcox'
+  )
+  de_markers$gene <- rownames(de_markers)
+  de_markers$cluster <- cl
+  de_markers$FDR <- p.adjust(de_markers$p_val, 'fdr')
+
+  marker_df <- rbind(marker_df, de_markers)
+
+}
+save(marker_df, file=paste0(data_dir, '5x_vs_5xFIRE_DEGs.rda'))
+load(file=paste0(data_dir, '5x_vs_5xFIRE_DEGs.rda'))
+
+# save markers as a csv:
+write.csv(marker_df, file=paste0(data_dir, '5x_vs_5xFIRE_major_celltypes.csv'), row.names=FALSE, quote=FALSE)
+marker_df <- read.csv(file=paste0(data_dir, '5x_vs_5xFIRE_major_celltypes.csv'), stringsAsFactors=FALSE)
+
+markers <- subset(marker_df, FDR <= 0.1); table(markers$avg_logFC > 0)
+markers <- dplyr::rename(markers, c(group=cluster))
+markers$group <- factor(as.character(markers$group), levels=unique(markers$group)[order(as.character(unique(markers$group)))])
+
+#################################################################################
+#  volcano plot
+#################################################################################
+
+# get genes to annotate:
+markers <- Reduce(rbind, lapply(unique(markers$group), function(x){
+  cur <- subset(markers, group == x)
+  cur$anno <- ifelse(cur$avg_logFC > cur$avg_logFC[rev(order(cur$avg_logFC))][6], cur$gene, '')
+  cur$anno <- ifelse(cur$avg_logFC < cur$avg_logFC[order(cur$avg_logFC)][6], cur$gene, cur$anno)
+  cur
+}))
+
+
+# keep groups that have more than 10 DEGs:
+groups.keep <- table(markers$group) >= 10
+groups.keep <- names(groups.keep)[groups.keep]
+markers <- subset(markers, group %in% groups.keep)
+
+markers$color <- ifelse(markers$avg_logFC > 0, '5xFIRE', '5xFAD')
+
+p<- ggplot(markers, aes(x=avg_logFC, y=-log10(FDR), color=color)) +
+  geom_point() +
+  scale_color_manual(values=c(sample_color.scheme[['5xFAD']], sample_color.scheme[['5xFIRE']])) +
+  geom_text_repel(
+    inherit.aes=FALSE,
+    data=subset(markers, !is.na(anno)),
+    aes(x=avg_logFC, y=-log10(FDR), label=anno)
+  ) +
+  #ggtitle(paste(cluster)) +
+  xlim(-1*max(abs(markers$avg_logFC))-0.1, max(abs(markers$avg_logFC))+0.1)+
+  theme(legend.position='bottom') + labs(color='')
+
+
+pdf(paste0(fig_dir, '5x_vs_5xFIRE_volcano.pdf'), width=10, height=10, useDingbats=FALSE)
+p + facet_wrap(~group, scales='free')
+dev.off()
+
+
+
+```
+
+5xFIRE + transplant vs 5xFIRE + PBS major cell types
+
+```{r eval=FALSE}
+
+marker_df <- data.frame()
+for(cl in unique(seurat_obj$cellchat_clusters)){
+  print(cl)
+  seurat_degs <- subset(seurat_obj, cellchat_clusters == cl & DX %in% c('5xFIRE + PBS', '5xFIRE + transplant'))
+  Idents(seurat_degs) <- seurat_degs$DX
+  de_markers <- FindMarkers(
+    seurat_degs,
+    ident.1 = '5xFIRE + transplant',
+    ident.2 = '5xFIRE + PBS',
+    only.pos=FALSE,
+    min.pct=0,
+    logfc.threshold=0,
+    test.use='wilcox'
+  )
+  de_markers$gene <- rownames(de_markers)
+  de_markers$cluster <- cl
+  de_markers$FDR <- p.adjust(de_markers$p_val, 'fdr')
+
+  marker_df <- rbind(marker_df, de_markers)
+
+}
+save(marker_df, file=paste0(data_dir, '5xFIRE-transplant_vs_5xFIRE-PBS_DEGs.rda'))
+load(file=paste0(data_dir, '5xFIRE-transplant_vs_5xFIRE-PBS_DEGs.rda'))
+
+# save markers as a csv:
+write.csv(marker_df, file=paste0(data_dir, '5xFIRE-transplant_vs_5xFIRE-PBS_DEGs_major_celltypes.csv'), row.names=FALSE, quote=FALSE)
+
+
+
+markers <- subset(marker_df, FDR <= 0.1 & !cluster %in% c('EPD', 'OEC')); table(markers$avg_logFC > 0)
+markers <- dplyr::rename(markers, c(group=cluster))
+markers$group <- factor(as.character(markers$group), levels=unique(markers$group)[order(as.character(unique(markers$group)))])
+
+#################################################################################
+#  volcano plot
+#################################################################################
+
+# get genes to annotate:
+markers <- Reduce(rbind, lapply(unique(markers$group), function(x){
+  cur <- subset(markers, group == x)
+  cur$anno <- ifelse(cur$avg_logFC > cur$avg_logFC[rev(order(cur$avg_logFC))][6], cur$gene, '')
+  cur$anno <- ifelse(cur$avg_logFC < cur$avg_logFC[order(cur$avg_logFC)][6], cur$gene, cur$anno)
+  cur
+}))
+
+markers$color <- ifelse(markers$avg_logFC > 0, '5xFIRE + transplant', '5xFAD + PBS')
+
+p<- ggplot(markers, aes(x=avg_logFC, y=-log10(FDR), color=color)) +
+  geom_point() +
+  scale_color_manual(values=c(sample_color.scheme[['5xFIRE + PBS']], sample_color.scheme[['5xFIRE + transplant']])) +
+  geom_text_repel(
+    inherit.aes=FALSE,
+    data=subset(markers, !is.na(anno)),
+    aes(x=avg_logFC, y=-log10(FDR), label=anno)
+  ) +
+  #ggtitle(paste(cluster)) +
+  xlim(-1*max(abs(markers$avg_logFC))-0.1, max(abs(markers$avg_logFC))+0.1)+
+  theme(legend.position='bottom', panel.grid.major = element_line(colour = "lightgrey")) + labs(color='')
+
+
+pdf(paste0(fig_dir, '5xFIRE-transplant_vs_5xFIRE-PBS_volcano.pdf'), width=10, height=10, useDingbats=FALSE)
+p + facet_wrap(~group, scales='free')
+dev.off()
+
+
+```
+
+
+5xFIRE + transplant vs 5xFIRE major cell types
+
+```{r eval=FALSE}
+
+marker_df <- data.frame()
+for(cl in unique(seurat_obj$cellchat_clusters)){
+  print(cl)
+  seurat_degs <- subset(seurat_obj, cellchat_clusters == cl & DX %in% c('5xFIRE', '5xFIRE + transplant'))
+  Idents(seurat_degs) <- seurat_degs$DX
+  de_markers <- FindMarkers(
+    seurat_degs,
+    ident.1 = '5xFIRE + transplant',
+    ident.2 = '5xFIRE',
+    only.pos=FALSE,
+    min.pct=0,
+    logfc.threshold=0,
+    test.use='wilcox'
+  )
+  de_markers$gene <- rownames(de_markers)
+  de_markers$cluster <- cl
+  de_markers$FDR <- p.adjust(de_markers$p_val, 'fdr')
+
+  marker_df <- rbind(marker_df, de_markers)
+
+}
+save(marker_df, file=paste0(data_dir, '5xFIRE-transplant_vs_5xFIRE_DEGs.rda'))
+load(file=paste0(data_dir, '5xFIRE-transplant_vs_5xFIRE_DEGs.rda'))
+
+# save markers as a csv:
+write.csv(marker_df, file=paste0(data_dir, '5xFIRE-transplant_vs_5xFIRE_DEGs_major_celltypes.csv'), row.names=FALSE, quote=FALSE)
+
+
+
+markers <- subset(marker_df, FDR <= 0.1 & !cluster %in% c('EPD', 'OEC')); table(markers$avg_logFC > 0)
+markers <- dplyr::rename(markers, c(group=cluster))
+markers$group <- factor(as.character(markers$group), levels=unique(markers$group)[order(as.character(unique(markers$group)))])
+
+#################################################################################
+#  volcano plot
+#################################################################################
+
+# get genes to annotate:
+markers <- Reduce(rbind, lapply(unique(markers$group), function(x){
+  cur <- subset(markers, group == x)
+  cur$anno <- ifelse(cur$avg_logFC > cur$avg_logFC[rev(order(cur$avg_logFC))][6], cur$gene, '')
+  cur$anno <- ifelse(cur$avg_logFC < cur$avg_logFC[order(cur$avg_logFC)][6], cur$gene, cur$anno)
+  cur
+}))
+
+markers$color <- ifelse(markers$avg_logFC > 0, '5xFIRE + transplant', '5xFIRE')
+
+p<- ggplot(markers, aes(x=avg_logFC, y=-log10(FDR), color=color)) +
+  geom_point() +
+  scale_color_manual(values=c(sample_color.scheme[['5xFIRE']], sample_color.scheme[['5xFIRE + transplant']])) +
+  geom_text_repel(
+    inherit.aes=FALSE,
+    data=subset(markers, !is.na(anno)),
+    aes(x=avg_logFC, y=-log10(FDR), label=anno)
+  ) +
+  #ggtitle(paste(cluster)) +
+  xlim(-1*max(abs(markers$avg_logFC))-0.1, max(abs(markers$avg_logFC))+0.1)+
+  theme(legend.position='bottom', panel.grid.major = element_line(colour = "lightgrey")) + labs(color='')
+
+
+pdf(paste0(fig_dir, '5xFIRE-transplant_vs_5xFIRE_volcano.pdf'), width=10, height=10, useDingbats=FALSE)
+p + facet_wrap(~group, scales='free')
+dev.off()
+
+
+```
+
+
+5xFIRE + transplant vs 5xFAD major cell types
+
+```{r eval=FALSE}
+
+library(future)
+plan('multiprocess', workers=8)
+
+marker_df <- data.frame()
+for(cl in unique(seurat_obj$cellchat_clusters)){
+  print(cl)
+  seurat_degs <- subset(seurat_obj, cellchat_clusters== cl & DX %in% c('5xFAD', '5xFIRE + transplant'))
+  Idents(seurat_degs) <- seurat_degs$DX
+  de_markers <- FindMarkers(
+    seurat_degs,
+    ident.1 = '5xFIRE + transplant',
+    ident.2 = '5xFAD',
+    only.pos=FALSE,
+    min.pct=0,
+    logfc.threshold=0,
+    test.use='wilcox'
+  )
+  de_markers$gene <- rownames(de_markers)
+  de_markers$cluster <- cl
+  de_markers$FDR <- p.adjust(de_markers$p_val, 'fdr')
+
+  marker_df <- rbind(marker_df, de_markers)
+
+}
+save(marker_df, file=paste0(data_dir, '5xFIRE-transplant_vs_5xFAD_DEGs.rda'))
+load(file=paste0(data_dir, '5xFIRE-transplant_vs_5xFAD_DEGs.rda'))
+
+# save markers as a csv:
+write.csv(marker_df, file=paste0(data_dir, '5xFIRE-transplant_vs_5xFAD_DEGs_major_celltypes.csv'), row.names=FALSE, quote=FALSE)
+
+
+
+# markers <- subset(marker_df, FDR <= 0.1 & !cluster %in% c('EPD', 'OEC')); table(markers$avg_logFC > 0)
+
+markers <- subset(marker_df, FDR <= 0.1 ); table(markers$avg_logFC > 0)
+
+
+markers <- dplyr::rename(markers, c(group=cluster))
+markers$group <- factor(as.character(markers$group), levels=unique(markers$group)[order(as.character(unique(markers$group)))])
+
+#################################################################################
+#  volcano plot
+#################################################################################
+
+# get genes to annotate:
+markers <- Reduce(rbind, lapply(unique(markers$group), function(x){
+  cur <- subset(markers, group == x)
+  cur$anno <- ifelse(cur$avg_logFC > cur$avg_logFC[rev(order(cur$avg_logFC))][6], cur$gene, '')
+  cur$anno <- ifelse(cur$avg_logFC < cur$avg_logFC[order(cur$avg_logFC)][6], cur$gene, cur$anno)
+  cur
+}))
+
+markers$color <- ifelse(markers$avg_logFC > 0, '5xFIRE + transplant', '5xFAD')
+
+p<- ggplot(markers, aes(x=avg_logFC, y=-log10(FDR), color=color)) +
+  geom_point() +
+  scale_color_manual(values=c(sample_color.scheme[['5xFAD']], sample_color.scheme[['5xFIRE + transplant']])) +
+  geom_text_repel(
+    inherit.aes=FALSE,
+    data=subset(markers, !is.na(anno)),
+    aes(x=avg_logFC, y=-log10(FDR), label=anno)
+  ) +
+  #ggtitle(paste(cluster)) +
+  xlim(-1*max(abs(markers$avg_logFC))-0.1, max(abs(markers$avg_logFC))+0.1)+
+  theme(legend.position='bottom', panel.grid.major = element_line(colour = "lightgrey")) + labs(color='')
+
+
+pdf(paste0(fig_dir, '5xFIRE-transplant_vs_5xFAD_volcano.pdf'), width=10, height=10, useDingbats=FALSE)
+p + facet_wrap(~group, scales='free')
+dev.off()
+
+#################################################################################
+#  GO terms for IMM cluster:
+#################################################################################
+
+load(file=paste0(data_dir, '5xFIRE-transplant_vs_5xFAD_DEGs.rda'))
+markers <- subset(marker_df, FDR <= 0.1 ); table(markers$avg_logFC > 0)
+
+
+library(enrichR)
+
+# helper fucntion
+wrapText <- function(x, len) {
+    sapply(x, function(y) paste(strwrap(y, len), collapse = "\n"), USE.NAMES = FALSE)
+}
+
+dbs<-c('GO_Biological_Process_2018','GO_Cellular_Component_2018','GO_Molecular_Function_2018', 'WikiPathways_2019_Mouse', 'KEGG_2019_Mouse')
+
+
+
+marker.genes.up <- markers %>% subset(cluster == 'IMM' & avg_logFC >= 0) %>% top_n(75, wt=avg_logFC) %>% .$gene
+marker.genes.down <- markers %>% subset(cluster == 'IMM' & avg_logFC < 0) %>% top_n(-75, wt=avg_logFC) %>% .$gene
+
+cur_result_up <- enrichr(marker.genes.up, dbs)
+cur_result_down <- enrichr(marker.genes.down, dbs)
+
+
+patch_list<- list()
+
+for(db in dbs){
+  print(db)
+  plot_df <- cur_result_up[[db]] %>% top_n(15, wt=Combined.Score)
+  plot_df$Term <- do.call(rbind, strsplit(plot_df$Term, '[(]GO:'))[,1]
+  plot_df$wrap <- wrapText(plot_df$Term, 50)
+
+
+  p1 <- ggplot(plot_df, aes(x=Combined.Score, y=reorder(wrap, Combined.Score)))+
+  geom_bar(stat='identity', position='identity', color='white', fill='lightgrey') +
+  geom_text(aes(label=wrap), x=5, color="black", size=3.5, hjust='left') +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    legend.title = element_blank(),
+    axis.ticks.y=element_blank(),
+    axis.text.y=element_blank(),
+    plot.title = element_text(hjust = 0.5)
+  ) + ylab('Term') + xlab('Combined.Score') + ggtitle('Upregulated in 5xFIRE-Transplant IMM')
+
+
+  plot_df <- cur_result_down[[db]] %>% top_n(15, wt=Combined.Score)
+  plot_df$Term <- do.call(rbind, strsplit(plot_df$Term, '[(]GO:'))[,1]
+  plot_df$wrap <- wrapText(plot_df$Term, 50)
+
+  p2 <- ggplot(plot_df, aes(x=Combined.Score, y=reorder(wrap, Combined.Score)))+
+  geom_bar(stat='identity', position='identity', color='white', fill='lightgrey') +
+  geom_text(aes(label=wrap), x=5, color="black", size=3.5, hjust='left') +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    legend.title = element_blank(),
+    axis.ticks.y=element_blank(),
+    axis.text.y=element_blank(),
+    plot.title = element_text(hjust = 0.5)
+  ) + ylab('Term') + xlab('Combined.Score') + ggtitle('Upregulated in 5xFAD IMM')
+
+
+  patch <- p1 + p2 + plot_annotation(title=db, theme = theme(plot.title = element_text(hjust = 0.5)))
+  patch_list[[db]] <- patch
+
+}
+
+pdf(paste0('figures/5xFIRE-transplant_vs_5xFAD_IMM_GOterms.pdf'), width=8, height=8)
+for(db in dbs){
+  print(patch_list[[db]])
+}
+dev.off()
+
+
+
+
+```
+
+
+FIRE vs WT
+
+```{r eval=FALSE}
+
+library(future)
+plan('multiprocess', workers=8)
+
+marker_df <- data.frame()
+for(cl in unique(seurat_obj$cellchat_clusters)){
+  print(cl)
+  seurat_degs <- subset(seurat_obj, cellchat_clusters== cl & DX %in% c('WT', 'FIRE'))
+  Idents(seurat_degs) <- seurat_degs$DX
+  de_markers <- FindMarkers(
+    seurat_degs,
+    ident.1 = 'FIRE',
+    ident.2 = 'WT',
+    only.pos=FALSE,
+    min.pct=0,
+    logfc.threshold=0,
+    test.use='wilcox'
+  )
+  de_markers$gene <- rownames(de_markers)
+  de_markers$cluster <- cl
+  de_markers$FDR <- p.adjust(de_markers$p_val, 'fdr')
+
+  marker_df <- rbind(marker_df, de_markers)
+
+}
+save(marker_df, file=paste0(data_dir, 'FIRE_vs_WT_DEGs.rda'))
+load(file=paste0(data_dir, 'FIRE_vs_WT_DEGs.rda'))
+
+# save markers as a csv:
+write.csv(marker_df, file=paste0(data_dir, 'FIRE_vs_WT.csv'), row.names=FALSE, quote=FALSE)
+
+
+
+# markers <- subset(marker_df, FDR <= 0.1 & !cluster %in% c('EPD', 'OEC')); table(markers$avg_logFC > 0)
+
+markers <- subset(marker_df, FDR <= 0.1 ); table(markers$avg_logFC > 0)
+
+
+markers <- dplyr::rename(markers, c(group=cluster))
+markers$group <- factor(as.character(markers$group), levels=unique(markers$group)[order(as.character(unique(markers$group)))])
+
+#################################################################################
+#  volcano plot
+#################################################################################
+
+# get genes to annotate:
+markers <- Reduce(rbind, lapply(unique(markers$group), function(x){
+  cur <- subset(markers, group == x)
+  cur$anno <- ifelse(cur$avg_logFC > cur$avg_logFC[rev(order(cur$avg_logFC))][6], cur$gene, '')
+  cur$anno <- ifelse(cur$avg_logFC < cur$avg_logFC[order(cur$avg_logFC)][6], cur$gene, cur$anno)
+  cur
+}))
+
+markers$color <- ifelse(markers$avg_logFC > 0, 'FIRE', 'WT')
+
+p<- ggplot(markers, aes(x=avg_logFC, y=-log10(FDR), color=color)) +
+  geom_point() +
+  scale_color_manual(values=c(sample_color.scheme[['WT']], sample_color.scheme[['FIRE']])) +
+  geom_text_repel(
+    inherit.aes=FALSE,
+    data=subset(markers, !is.na(anno)),
+    aes(x=avg_logFC, y=-log10(FDR), label=anno)
+  ) +
+  #ggtitle(paste(cluster)) +
+  xlim(-1*max(abs(markers$avg_logFC))-0.1, max(abs(markers$avg_logFC))+0.1)+
+  theme(legend.position='bottom', panel.grid.major = element_line(colour = "lightgrey")) + labs(color='')
+
+
+pdf(paste0(fig_dir, 'FIRE_vs_WT_volcano.pdf'), width=10, height=10, useDingbats=FALSE)
+p + facet_wrap(~group, scales='free')
+dev.off()
+
+
+
+
+```
+
+
+
+GO terms for one cluster as an example:
+
+```{r eval=FALSE}
+
+library(enrichR)
+library(simplifyEnrichment)
+
+# helper fucntion
+wrapText <- function(x, len) {
+    sapply(x, function(y) paste(strwrap(y, len), collapse = "\n"), USE.NAMES = FALSE)
+}
+
+dbs <- c('GO_Biological_Process_2018','GO_Cellular_Component_2018',
+         'GO_Molecular_Function_2018')
+
+marker.genes.up <- markers %>% subset(group == 'IMM' ) %>% top_n(100, wt=avg_logFC) %>% .$gene
+marker.genes.down <- markers %>% subset(group == 'IMM' ) %>% top_n(-100, wt=avg_logFC) %>% .$gene
+
+cur_result_up <- enrichr(marker.genes.up, dbs)
+cur_result_down <- enrichr(marker.genes.down, dbs)
+
+
+
+plot_df <- cur_result_up$GO_Biological_Process_2018 %>% top_n(15, wt=Combined.Score)
+plot_df$Term <- do.call(rbind, strsplit(plot_df$Term, '[(]GO:'))[,1]
+plot_df$wrap <- wrapText(plot_df$Term, 35)
+
+
+p <- ggplot(plot_df, aes(x=Combined.Score, y=reorder(wrap, Combined.Score)))+
+  geom_bar(stat='identity', position='identity', color='black') +
+  theme(
+    panel.grid.major=element_blank(),
+    panel.grid.minor=element_blank(),
+    legend.title = element_blank()
+  ) + ylab('') + xlab('Combined.Score')
+
+pdf(paste0('figures/IMM_up_GOterms.pdf'), width=5, height=7)
+print(p)
+dev.off()
+
+
+# just get the GO ID
+plot_df <- cur_result_up$GO_Biological_Process_2018 %>% top_n(100, wt=Combined.Score)
+go_id <- as.character(sapply(plot_df$Term, function(j){gsub("[\\(\\)]", "", regmatches(j, gregexpr("\\(.*?\\)", j))[[1]])}))
+mat = GO_similarity(go_id)
+
+pdf('figures/IMM_5xFIRE_goTerm_clusters.pdf', width=10, height=6)
+simplifyGO(mat)
+dev.off()
+
+
+plot_df <- cur_result_down$GO_Biological_Process_2018 %>% top_n(100, wt=Combined.Score)
+go_id <- as.character(sapply(plot_df$Term, function(j){gsub("[\\(\\)]", "", regmatches(j, gregexpr("\\(.*?\\)", j))[[1]])}))
+mat = GO_similarity(go_id)
+
+pdf('figures/IMM_5xFAD_goTerm_clusters.pdf', width=10, height=6)
+simplifyGO(mat)
+dev.off()
+
+```

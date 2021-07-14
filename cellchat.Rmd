@@ -1,0 +1,233 @@
+
+```{r eval=FALSE}
+
+
+# in bash terminal:
+# conda activate spatial
+library(CellChat)
+library(Seurat)
+library(tidyverse)
+library(cowplot)
+library(Matrix)
+library(viridis)
+library(presto)
+library(harmony)
+library(ggpubr)
+library(DoubletFinder)
+library(RColorBrewer)
+library(ggrepel)
+library(patchwork)
+colfunc <- colorRampPalette(rev(brewer.pal(11, 'Spectral' )))
+prediction.colfunc <- colorRampPalette(rev(brewer.pal(9, 'Purples' )[2:9]))
+
+theme_set(theme_cowplot())
+
+# setwd("/dfs3b/swaruplab/smorabit/analysis/FIRE_mouse_2021/hardcore_filtering/")
+setwd("/dfs3b/swaruplab/smorabit/analysis/FIRE_mouse_2021/cellchat/")
+
+# directories
+data_dir <- "data/"
+fig_dir <- 'figures/'
+
+
+umap_theme <- theme(
+  axis.line=element_blank(),
+  axis.text.x=element_blank(),
+  axis.text.y=element_blank(),
+  axis.ticks=element_blank(),
+  axis.title.x=element_blank(),
+  axis.title.y=element_blank(),
+  panel.background=element_blank(),
+  panel.border=element_blank(),
+  panel.grid.major=element_blank(),
+  panel.grid.minor=element_blank(),
+  plot.background=element_blank()
+)
+
+# re-load:
+seurat_obj <- readRDS('/dfs3b/swaruplab/smorabit/analysis/FIRE_mouse_2021/data/FIRE_mouse_seurat.rds')
+
+# color scheme:
+load('../4-conditions/data/color_scheme_4-conditions_celltype.rda')
+
+
+# color scheme for samples:
+color.scheme <- c(
+  brewer.pal(9, 'Reds')[2:9],
+  brewer.pal(9, 'Purples')[2:9],
+  brewer.pal(9, 'Oranges')[2:9],
+  brewer.pal(9, 'Greys')[2:9],
+  brewer.pal(9, 'Blues')[2:9],
+  brewer.pal(9, 'Greens')[2:9]
+)
+names(color.scheme) <- as.character(levels(seurat_obj$SampleID))
+
+sample_color.scheme <- c(
+  brewer.pal(9, 'Greys')[5],
+  brewer.pal(9, 'Purples')[7],
+  brewer.pal(9, 'Oranges')[6],
+  brewer.pal(9, 'Reds')[6],
+  brewer.pal(9, 'Blues')[5],
+  brewer.pal(9, 'Greens')[5]
+)
+names(sample_color.scheme) <- levels(seurat_obj$DX)
+
+
+```
+
+Process each of the 6 conditions as their own CellChat object:
+
+```{r eval=FALSE}
+
+################################################################################
+# create cellchat objects
+################################################################################
+
+# remove OEC since it is too small:
+seurat_obj <- subset(seurat_obj, class != 'OEC')
+
+seurat_obj$cellchat_clusters <- ifelse(seurat_obj$class %in% c('EX', 'INH'), as.character(seurat_obj$cluster_name), as.character(seurat_obj$class))
+Idents(seurat_obj) <- seurat_obj$cellchat_clusters
+
+data.input <- GetAssayData(seurat_obj, assay = "RNA", slot = "data")
+labels <- Idents(seurat_obj)
+meta <- data.frame(group = labels, row.names = names(labels))
+conditions <- seurat_obj$DX %>% unique %>% as.character
+
+# make a list of cellchat objects:
+CellChatDB <- CellChatDB.mouse
+
+cellchat_list <- list()
+for(cond in conditions){
+  print(cond)
+  cellchat_list[[cond]] <- createCellChat(
+    object = data.input[,seurat_obj$DX == cond],
+    meta = seurat_obj@meta.data %>% subset(DX == cond),
+    group.by = "cellchat_clusters"
+  )
+  cellchat_list[[cond]]@DB <- CellChatDB
+}
+
+
+################################################################################
+# process data
+################################################################################
+
+future::plan("multiprocess", workers = 8)
+
+for(cond in conditions){
+  print(cond)
+  cellchat_list[[cond]] <- subsetData(cellchat_list[[cond]])
+  cellchat_list[[cond]] <- identifyOverExpressedGenes(cellchat_list[[cond]])
+  cellchat_list[[cond]] <- identifyOverExpressedInteractions(cellchat_list[[cond]])
+  cellchat_list[[cond]] <- projectData(cellchat_list[[cond]], PPI.mouse)
+  cellchat_list[[cond]] <- computeCommunProb(cellchat_list[[cond]], raw.use = TRUE)
+  cellchat_list[[cond]] <- filterCommunication(cellchat_list[[cond]], min.cells = 10)
+  df.net <- subsetCommunication(cellchat_list[[cond]])
+  cellchat_list[[cond]] <- computeCommunProbPathway(cellchat_list[[cond]])
+  cellchat_list[[cond]] <- aggregateNet(cellchat_list[[cond]])
+
+  # save individual cellchat object:
+  print('saving')
+  saveRDS(cellchat_list[[cond]], file=paste0(data_dir, gsub(' ', '_', cond), '_cellchat.rds'))
+}
+
+# merge datasets into one cellchat object:
+
+cellchat <- mergeCellChat(cellchat_list, add.names = names(cellchat_list))
+
+
+```
+
+re-load cellchat objects:
+
+```{r eval=FALSE}
+
+cellchat_list <- list()
+conditions <- seurat_obj$DX %>% unique %>% as.character
+for(cond in conditions){
+  cellchat_list[[cond]] <- readRDS(paste0(data_dir, gsub(' ', '_', cond), '_cellchat.rds'))
+}
+
+cellchat <- mergeCellChat(cellchat_list, add.names = names(cellchat_list))
+
+
+```
+
+
+visualize pathways:
+
+```{r eval=FALSE}
+
+pathways.show <- c("PDGF"); name <- 'PDGF'
+
+pdf(paste0(fig_dir,'signaling/', name, '_circle_compare.pdf'), width=10, height=10, useDingbats=FALSE)
+par(mfrow = c(2,2), xpd=TRUE)
+for (i in 1:length(cellchat_list)) {
+  netVisual_aggregate(cellchat_list[[i]], signaling = pathways.show, layout = "circle", edge.width.max = 10, signaling.name = paste(pathways.show, names(cellchat_list)[i]), color.use=celltype_colors)
+}
+dev.off()
+
+
+# TGFb pathway: ################################################################
+names(cellchat_list)
+
+pathways.show <- c("TGFb"); name <- 'TGFb'
+
+pdf(paste0(fig_dir,'signaling/', name, '_circle_compare.pdf'), width=10, height=10, useDingbats=FALSE)
+par(mfrow = c(2,2), xpd=TRUE)
+for (i in 1:length(cellchat_list)) {
+
+  if(i %in% c(1, 3, 4)){next}
+  netVisual_aggregate(cellchat_list[[i]], signaling = pathways.show, layout = "circle", edge.width.max = 5, signaling.name = paste(pathways.show, names(cellchat_list)[i]), color.use=celltype_colors)
+
+}
+dev.off()
+
+pdf(paste0(fig_dir, 'signaling/', name, '_violin.pdf'), width=10, height=5)
+for(i in 1:length(cellchat_list)){
+  print(plotGeneExpression(cellchat_list[[i]], signaling = pathways.show, color.use=celltype_colors) + plot_annotation(title=names(cellchat_list)[i]))
+}
+dev.off()
+
+
+# seurat violin plot:
+genes <- c('Tgfb1', 'Tgfb2', 'Tgfb3', 'Tgfbr1', 'Acvr1b', 'Acvr1c', 'Acvr1', 'Tgfbr2')
+
+Idents(seurat_obj) <- seurat_obj$cellchat_clusters
+
+
+p <- StackedVlnPlot(seurat_obj, features = genes, split.by='DX') + RestoreLegend() +
+scale_fill_manual(values=sample_color.scheme)
+
+pdf(paste0(fig_dir, 'signaling/', name, '_violin_seurat.pdf'), width=14, height=7)
+p
+dev.off()
+
+
+
+# VEGF pathway: ################################################################
+names(cellchat_list)
+
+pathways.show <- c("VEGF"); name <- 'VEGF'
+
+pdf(paste0(fig_dir,'signaling/', name, '_circle_compare.pdf'), width=10, height=10, useDingbats=FALSE)
+par(mfrow = c(2,2), xpd=TRUE)
+for (i in 1:length(cellchat_list)) {
+
+  #if(i %in% c(1, 3, 4)){next}
+  netVisual_aggregate(cellchat_list[[i]], signaling = pathways.show, layout = "circle", edge.width.max = 5, signaling.name = paste(pathways.show, names(cellchat_list)[i]), color.use=celltype_colors)
+
+}
+dev.off()
+
+pdf(paste0(fig_dir, 'signaling/', name, '_violin.pdf'), width=10, height=5)
+for(i in 1:length(cellchat_list)){
+  print(plotGeneExpression(cellchat_list[[i]], signaling = pathways.show, color.use=celltype_colors) + plot_annotation(title=names(cellchat_list)[i]))
+}
+dev.off()
+
+
+
+
+```
