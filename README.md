@@ -1,6 +1,6 @@
 # FIRE-mouse-2021-paper
 
-This repository contains all of the code used to process and analyze the SPLiT-seq
+This repository contains all of the code used to process and analyze the snRNA-seq
 data for Shabestari et al 2021.
 
 
